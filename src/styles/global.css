@@ -1,0 +1,53 @@
+:root {
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Dark / Emerald Theme Tokens */
+  --bg-canvas: #080d15;
+  --bg-card-dark: rgba(12, 20, 34, 0.9);
+  --bg-icon-box: #0f2136;
+  --bg-btn-dark: #0f1726;
+  --bg-btn-dark-hover: #131f33;
+
+  --border-card-dark: #1e2f47;
+  --border-icon-box: #233f63;
+  --border-btn-dark: #233550;
+  --border-divider-dark: #18263a;
+
+  --accent-emerald: #34d399;
+  --accent-emerald-glow: rgba(16, 185, 129, 0.2);
+  --accent-emerald-ambient: rgba(16, 185, 129, 0.1);
+  --accent-emerald-border: rgba(16, 185, 129, 0.5);
+
+  /* Light Surface Tokens (Dashboard / App content) */
+  --bg-surface: #ffffff;
+  --bg-surface-muted: #f8fafc;
+  --bg-badge-neutral: #f1f5f9;
+  --bg-badge-success: #dcfce7;
+
+  --border-light: #e2e8f0;
+  --border-subtle: #f1f5f9;
+
+  --text-white: #ffffff;
+  --text-slate-100: #f1f5f9;
+  --text-slate-400: #94a3b8;
+  --text-slate-500: #64748b;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-success: #16a34a;
+  --text-success-dark: #166534;
+  --text-danger: #dc2626;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
