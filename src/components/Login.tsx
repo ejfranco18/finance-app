@@ -1,89 +1,98 @@
 import React, { useState } from 'react';
 import { signInWithPopup } from 'firebase/auth';
-import { auth, googleProvider } from '../lib/firebaseClient.js';
+import { auth, googleProvider } from '../lib/firebaseClient';
+import styles from './Login.module.css';
 
 export const Login: React.FC = () => {
-  const [loading, setLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleGoogleLogin = async () => {
-    setLoading(true);
+    setIsLoading(true);
     setError(null);
     try {
       await signInWithPopup(auth, googleProvider);
-    } catch (err: any) {
-      console.error("Error de autenticación:", err);
-      setError(err.message || "Error al iniciar sesión con Google");
+    } catch (err: unknown) {
+      console.error('Error de autenticación con Google');
+      setError('No se pudo iniciar sesión con Google. Por favor, inténtalo de nuevo.');
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '80vh',
-      fontFamily: 'system-ui, -apple-system, sans-serif'
-    }}>
-      <div style={{
-        padding: '2.5rem',
-        borderRadius: '12px',
-        boxShadow: '0 4px 20px rgba(0,0,0,0.08)',
-        backgroundColor: '#ffffff',
-        textAlign: 'center',
-        maxWidth: '400px',
-        width: '100%'
-      }}>
-        <h1 style={{ fontSize: '1.8rem', marginBottom: '0.5rem', color: '#1a1a1a' }}>Finance App</h1>
-        <p style={{ color: '#666', marginBottom: '2rem', fontSize: '0.95rem' }}>
+    <div className={styles.container}>
+      {/* Luz ambiental de fondo */}
+      <div className={styles.ambientGlow} />
+
+      <div className={styles.card}>
+        {/* Glow superior de la tarjeta */}
+        <div className={styles.topGlow} />
+
+        {/* Icono de la App */}
+        <div className={styles.iconWrapper}>
+          <svg
+            className={styles.appIcon}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1" />
+            <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" />
+          </svg>
+        </div>
+
+        <h1 className={styles.title}>Finance App</h1>
+        <p className={styles.subtitle}>
           Gestiona tus cuentas, inversiones y el Canvas financiero en un solo lugar.
         </p>
 
         {error && (
-          <div style={{
-            backgroundColor: '#fee2e2',
-            color: '#dc2626',
-            padding: '0.75rem',
-            borderRadius: '6px',
-            marginBottom: '1.5rem',
-            fontSize: '0.875rem'
-          }}>
+          <div role="alert" className={styles.errorAlert}>
             {error}
           </div>
         )}
 
+        {/* Botón Continuar con Google */}
         <button
           onClick={handleGoogleLogin}
-          disabled={loading}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '12px',
-            width: '100%',
-            padding: '12px 16px',
-            border: '1px solid #dadce0',
-            borderRadius: '6px',
-            backgroundColor: '#ffffff',
-            color: '#3c4043',
-            fontSize: '1rem',
-            fontWeight: 500,
-            cursor: loading ? 'not-allowed' : 'pointer',
-            transition: 'background-color 0.2s'
-          }}
+          disabled={isLoading}
+          className={styles.googleButton}
         >
-          <svg width="18" height="18" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
-            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24s.92 7.54 2.56 10.78l7.97-6.19z"/>
-            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+          <svg className={styles.googleIcon} viewBox="0 0 24 24">
+            <path
+              fill="#4285F4"
+              d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3h3.86c2.26-2.09 3.68-5.17 3.68-9.09z"
+            />
+            <path
+              fill="#34A853"
+              d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.27v3.09C3.26 21.3 7.37 24 12 24z"
+            />
+            <path
+              fill="#FBBC05"
+              d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.13-1.57.38-2.29V6.62H1.27C.46 8.24 0 10.06 0 12s.46 3.76 1.27 5.38l4-3.09z"
+            />
+            <path
+              fill="#EA4335"
+              d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.37 0 3.26 2.7 1.27 6.62l4 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+            />
           </svg>
-          {loading ? 'Iniciando sesión...' : 'Continuar con Google'}
+          <span className={styles.googleButtonText}>
+            {isLoading ? 'Iniciando sesión...' : 'Continuar con Google'}
+          </span>
         </button>
+
+        {/* Footer de seguridad */}
+        <div className={styles.footer}>
+          <span>● Cifrado de 256 bits · Conexión segura con Calc_Data</span>
+        </div>
       </div>
     </div>
   );
 };
+
+export default Login;
+
