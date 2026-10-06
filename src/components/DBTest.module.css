@@ -1,0 +1,96 @@
+.statusText {
+  color: var(--text-muted);
+}
+
+.errorText {
+  color: var(--text-danger);
+}
+
+.card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-top: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.rateBadge {
+  background-color: var(--bg-badge-success);
+  color: var(--text-success-dark);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.groupBlock {
+  margin-top: 1.25rem;
+}
+
+.groupTitle {
+  margin: 0 0 0.75rem 0;
+  padding-bottom: 0.35rem;
+  border-bottom: 2px solid var(--border-light);
+  color: var(--text-primary);
+}
+
+.tableSection {
+  margin-bottom: 1.25rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background-color: var(--bg-surface-muted);
+}
+
+.sectionTitle {
+  margin: 0 0 0.5rem 0;
+  color: var(--text-secondary);
+}
+
+.emptyText {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.rowList {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.rowItem {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.fieldPair {
+  display: inline-block;
+  margin-right: 0.85rem;
+}
+
+.refreshBtn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  background-color: var(--bg-surface-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
