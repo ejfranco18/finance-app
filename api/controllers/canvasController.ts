@@ -151,9 +151,19 @@ export async function createAccount(req: Request, res: Response) {
     const currency = req.body?.currency === 'USD' ? 'USD' : 'COP';
     const initialBalance = Number(req.body?.initialBalance ?? req.body?.currentBalance ?? 0);
 
-    if (!userId || !name || name.length < 2 || !Number.isFinite(initialBalance) || initialBalance < 0) {
+    const isCreditCard =
+      type.toLowerCase() === 'tarjeta de crédito' || type.toLowerCase() === 'tarjeta de credito';
+
+    if (
+      !userId ||
+      !name ||
+      name.length < 2 ||
+      !Number.isFinite(initialBalance) ||
+      (!isCreditCard && initialBalance < 0)
+    ) {
       return res.status(400).json({
-        error: 'Datos inválidos. Indica un nombre válido y un saldo inicial mayor o igual a 0.',
+        error:
+          'Datos inválidos. Indica un nombre válido y un saldo inicial válido para el tipo de cuenta.',
       });
     }
 
