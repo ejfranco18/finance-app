@@ -1,7 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import { authenticateUser } from './lib/firebaseAdmin';
-import { createTransaction, deleteTransaction } from './controllers/transactionController';
+import {
+  createTransaction,
+  updateTransaction,
+  deleteTransaction,
+} from './controllers/transactionController';
 import { createLiabilityPayment } from './controllers/liabilityController';
 import { buyInvestment } from './controllers/investmentController';
 import {
@@ -36,6 +40,8 @@ app.post('/api/accounts', authenticateUser, createAccount);
 
 // 1. Transacciones Generales
 app.post('/api/transactions', authenticateUser, createTransaction);
+app.put('/api/transactions/:transactionId', authenticateUser, updateTransaction);
+app.put('/api/users/:userId/transactions/:transactionId', authenticateUser, updateTransaction);
 app.delete('/api/transactions/:transactionId', authenticateUser, deleteTransaction);
 app.delete('/api/users/:userId/transactions/:transactionId', authenticateUser, deleteTransaction);
 

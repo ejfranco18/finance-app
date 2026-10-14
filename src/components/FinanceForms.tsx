@@ -40,20 +40,157 @@ async function buildAuthHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
-const MACRO_CATEGORY_LABELS: Record<string, string> = {
-  apartamentos: 'Apartamentos',
-  transporte: 'Transporte',
-  hogar: 'Hogar',
-  alimentacion: 'Alimentación',
-  entretenimiento: 'Entretenimiento',
-  juegos: 'Juegos',
-  mercado: 'Mercado',
-  compras: 'Compras',
-  salud: 'Salud',
-  mascotas: 'Mascotas',
-  donaciones: 'Donaciones',
-  trabajo: 'Trabajo',
-  otros: 'Otros / Varios',
+interface CategoryGroup {
+  name: string;
+  dbType: string;
+  subcategories: string[];
+}
+
+const CATEGORIES_BY_TYPE: Record<TransactionType, CategoryGroup[]> = {
+  gasto: [
+    {
+      name: 'Alimentación',
+      dbType: 'GASTO',
+      subcategories: ['Restaurante', 'Domicilios', 'Cafés / Snacks'],
+    },
+    {
+      name: 'Mercado',
+      dbType: 'GASTO',
+      subcategories: ['Mercado'],
+    },
+    {
+      name: 'Apartamentos',
+      dbType: 'GASTO',
+      subcategories: ['Cuota apto', 'Impuestos / Predial'],
+    },
+    {
+      name: 'Vivienda',
+      dbType: 'GASTO',
+      subcategories: [
+        'Administración',
+        'Servicios públicos',
+        'Internet / Telefonía',
+        'Mantenimiento / Reparaciones',
+      ],
+    },
+    {
+      name: 'Hogar',
+      dbType: 'GASTO',
+      subcategories: ['Electrodomesticos', 'Muebles / Hogar'],
+    },
+    {
+      name: 'Transporte',
+      dbType: 'GASTO',
+      subcategories: [
+        'Combustible',
+        'Parqueadero',
+        'Peajes',
+        'Transporte público',
+        'Revision carro',
+        'Uber',
+        'SOAT / Seguro / Impuestos',
+        'Otros transporte',
+      ],
+    },
+    {
+      name: 'Viajes',
+      dbType: 'GASTO',
+      subcategories: [
+        'Pasajes',
+        'Hoteles',
+        'Comida',
+        'Museos / Actividades',
+        'Transporte en viaje',
+        'Otros viaje',
+      ],
+    },
+    {
+      name: 'Suscripciones',
+      dbType: 'GASTO',
+      subcategories: ['Streaming', 'Apple', 'Software / IA', 'Otras suscripciones'],
+    },
+    {
+      name: 'Entretenimiento',
+      dbType: 'GASTO',
+      subcategories: ['Cine', 'Eventos', 'Ocio', 'Conciertos', 'Otros entretenimiento'],
+    },
+    {
+      name: 'Juegos',
+      dbType: 'GASTO',
+      subcategories: ['Videojuegos', 'Juegos de mesa'],
+    },
+    {
+      name: 'Mascotas',
+      dbType: 'GASTO',
+      subcategories: ['Comida gatos', 'Arena', 'Veterinario', 'Accesorios', 'Otros mascotas'],
+    },
+    {
+      name: 'Salud',
+      dbType: 'GASTO',
+      subcategories: ['Medicamentos', 'Consultas', 'Odontologia', 'Otros salud'],
+    },
+    {
+      name: 'Personales',
+      dbType: 'GASTO',
+      subcategories: [
+        'Cuidado personal',
+        'Educación',
+        'Gimnasio / Deporte',
+        'Otros personales',
+      ],
+    },
+    {
+      name: 'Compras',
+      dbType: 'GASTO',
+      subcategories: ['Ropa y accesorios', 'Tecnología', 'Regalos', 'Otros compras'],
+    },
+    {
+      name: 'Donaciones',
+      dbType: 'GASTO',
+      subcategories: ['Donaciones'],
+    },
+    {
+      name: 'Otros',
+      dbType: 'GASTO',
+      subcategories: ['Otros gastos'],
+    },
+  ],
+  ingreso: [
+    {
+      name: 'Ingresos Fijos',
+      dbType: 'INGRESO_FIJO',
+      subcategories: ['Salario', 'Arriendo'],
+    },
+    {
+      name: 'Ingresos Variables',
+      dbType: 'INGRESO_VARIABLE',
+      subcategories: [
+        'Otros ingresos variables',
+        'Bonos / Comisiones',
+        'Reembolsos / Devoluciones',
+        'Rendimientos',
+      ],
+    },
+  ],
+  ahorro_inversion: [
+    {
+      name: 'Ahorro',
+      dbType: 'AHORRO',
+      subcategories: ['Ahorro COP', 'Ahorro USD', 'Fondo de emergencia'],
+    },
+    {
+      name: 'Inversión',
+      dbType: 'INVERSION',
+      subcategories: ['Acciones / ETFs', 'CDT / Renta fija', 'Inversión inmobiliaria'],
+    },
+  ],
+  transferencia: [
+    {
+      name: 'Transferencia',
+      dbType: 'TRANSFERENCIA',
+      subcategories: ['Pago Tarjeta de Crédito', 'Traspaso entre Cuentas'],
+    },
+  ],
 };
 
 /* =========================================================================
@@ -67,12 +204,34 @@ export interface AccountOption {
   currency: string;
 }
 
+export interface EditableTransaction {
+  id: string;
+  date: string;
+  description: string;
+  amount: string | number;
+  currency: string;
+  category_type: string;
+  category_name: string;
+  sub_category_name: string;
+  account_id: string;
+  destination_account_id?: string | null;
+  is_recurring?: boolean;
+}
+
 interface TransactionFormProps {
   isOpen: boolean;
   onClose: () => void;
   accounts?: AccountOption[];
   trm?: number;
+  editingTransaction?: EditableTransaction | null;
   onSubmitSuccess?: (payload: TransactionPayload) => void;
+}
+
+function mapDbCategoryTypeToUiType(dbType: string): TransactionType {
+  if (dbType === 'INGRESO_FIJO' || dbType === 'INGRESO_VARIABLE') return 'ingreso';
+  if (dbType === 'AHORRO' || dbType === 'INVERSION') return 'ahorro_inversion';
+  if (dbType === 'TRANSFERENCIA') return 'transferencia';
+  return 'gasto';
 }
 
 export const TransactionFormModal: React.FC<TransactionFormProps> = ({
@@ -80,9 +239,11 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   onClose,
   accounts = [],
   trm = 3303.16,
+  editingTransaction = null,
   onSubmitSuccess,
 }) => {
   const queryClient = useQueryClient();
+  const isEditing = Boolean(editingTransaction?.id);
   const [tipo, setTipo] = useState<TransactionType>('gasto');
   const [monto, setMonto] = useState<string>('');
   const [moneda, setMoneda] = useState<CurrencyCode>('COP');
@@ -90,8 +251,9 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   const [cuentaOrigenId, setCuentaOrigenId] = useState<AccountSource>(
     accounts[0]?.id || 'Cuenta Nu COP'
   );
-  const [categoriaMacroId, setCategoriaMacroId] = useState<string>('alimentacion');
-  const [subcategoria, setSubcategoria] = useState<string>('Mercado');
+  const [cuentaDestinoId, setCuentaDestinoId] = useState<AccountSource>('');
+  const [categoriaMacroId, setCategoriaMacroId] = useState<string>('Alimentación');
+  const [subcategoria, setSubcategoria] = useState<string>('Restaurante');
   const [descripcion, setDescripcion] = useState<string>('');
   const [esRecurrente, setEsRecurrente] = useState<boolean>(false);
 
@@ -99,11 +261,96 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [successPayload, setSuccessPayload] = useState<TransactionPayload | null>(null);
 
+  const availableCategories = CATEGORIES_BY_TYPE[tipo] || CATEGORIES_BY_TYPE.gasto;
+  const selectedCategoryGroup =
+    availableCategories.find((c) => c.name === categoriaMacroId) || availableCategories[0];
+  const availableSubcategories = selectedCategoryGroup?.subcategories || [];
+
+  const handleTipoChange = (newTipo: TransactionType) => {
+    setTipo(newTipo);
+    const firstCategory = CATEGORIES_BY_TYPE[newTipo]?.[0];
+    if (firstCategory) {
+      setCategoriaMacroId(firstCategory.name);
+      setSubcategoria(firstCategory.subcategories[0] || '');
+    }
+    if (newTipo === 'transferencia' && accounts.length > 0) {
+      const creditCardAcc = accounts.find((a) =>
+        a.type.toLowerCase().includes('tarjeta')
+      );
+      const nonCreditAcc = accounts.find(
+        (a) => !a.type.toLowerCase().includes('tarjeta')
+      );
+      if (nonCreditAcc) {
+        setCuentaOrigenId(nonCreditAcc.id);
+      }
+      if (creditCardAcc) {
+        setCuentaDestinoId(creditCardAcc.id);
+      } else {
+        const alternative = accounts.find((a) => a.id !== cuentaOrigenId);
+        setCuentaDestinoId(alternative?.id || accounts[0].id);
+      }
+    }
+  };
+
+  const handleCategoryChange = (newCategoryName: string) => {
+    setCategoriaMacroId(newCategoryName);
+    const found = availableCategories.find((c) => c.name === newCategoryName);
+    if (found) {
+      setSubcategoria(found.subcategories[0] || '');
+    }
+    if (errors.subcategoria) {
+      setErrors((prev) => ({ ...prev, subcategoria: '' }));
+    }
+  };
+
   useEffect(() => {
     if (accounts.length > 0 && (!cuentaOrigenId || cuentaOrigenId === 'Cuenta Nu COP')) {
       setCuentaOrigenId(accounts[0].id);
     }
-  }, [accounts, cuentaOrigenId]);
+    if (accounts.length > 0 && !cuentaDestinoId) {
+      const creditCardAcc = accounts.find((a) =>
+        a.type.toLowerCase().includes('tarjeta')
+      );
+      const secondAcc = accounts.find((a) => a.id !== accounts[0].id);
+      setCuentaDestinoId(creditCardAcc?.id || secondAcc?.id || accounts[0].id);
+    }
+  }, [accounts, cuentaOrigenId, cuentaDestinoId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSuccessPayload(null);
+    setErrors({});
+
+    if (editingTransaction) {
+      const mappedTipo = mapDbCategoryTypeToUiType(editingTransaction.category_type);
+      setTipo(mappedTipo);
+      setMonto(String(Number(editingTransaction.amount)));
+      setMoneda(editingTransaction.currency === 'USD' ? 'USD' : 'COP');
+      setFecha(editingTransaction.date || new Date().toISOString().split('T')[0]);
+      setCuentaOrigenId(
+        (editingTransaction.account_id || accounts[0]?.id || 'Cuenta Nu COP') as AccountSource
+      );
+      if (editingTransaction.destination_account_id) {
+        setCuentaDestinoId(editingTransaction.destination_account_id as AccountSource);
+      }
+      setCategoriaMacroId(editingTransaction.category_name || 'Alimentación');
+      setSubcategoria(editingTransaction.sub_category_name || 'Restaurante');
+      setDescripcion(editingTransaction.description || '');
+      setEsRecurrente(Boolean(editingTransaction.is_recurring));
+    } else {
+      setTipo('gasto');
+      setMonto('');
+      setMoneda('COP');
+      setFecha(new Date().toISOString().split('T')[0]);
+      if (accounts[0]?.id) {
+        setCuentaOrigenId(accounts[0].id);
+      }
+      setCategoriaMacroId('Alimentación');
+      setSubcategoria('Restaurante');
+      setDescripcion('');
+      setEsRecurrente(false);
+    }
+  }, [isOpen, editingTransaction, accounts]);
 
   if (!isOpen) return null;
 
@@ -119,8 +366,16 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       newErrors.fecha = 'La fecha de la transacción es obligatoria.';
     }
 
+    if (tipo === 'transferencia') {
+      if (!cuentaDestinoId) {
+        newErrors.cuentaDestinoId = 'Debes seleccionar la cuenta de destino.';
+      } else if (cuentaDestinoId === cuentaOrigenId) {
+        newErrors.cuentaDestinoId = 'La cuenta de origen y destino deben ser diferentes.';
+      }
+    }
+
     if (!subcategoria.trim() || subcategoria.trim().length < 2) {
-      newErrors.subcategoria = 'La subcategoría debe contener al menos 2 caracteres.';
+      newErrors.subcategoria = 'Debes seleccionar una subcategoría válida.';
     }
 
     if (descripcion.trim().length > 180) {
@@ -139,26 +394,28 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
     setSuccessPayload(null);
     setErrors({});
 
-    const categoryTypeMap: Record<TransactionType, string> = {
-      gasto: 'GASTO',
-      ingreso: esRecurrente ? 'INGRESO_FIJO' : 'INGRESO_VARIABLE',
-      ahorro_inversion: 'AHORRO',
-    };
-
-    const categoryName = MACRO_CATEGORY_LABELS[categoriaMacroId] || categoriaMacroId;
+    const categoryName = selectedCategoryGroup.name;
+    const categoryType = selectedCategoryGroup.dbType;
     const numericAmount = parseFloat(monto);
 
     try {
       const headers = await buildAuthHeaders();
-      const response = await fetch('/api/transactions', {
-        method: 'POST',
+      const endpoint =
+        isEditing && editingTransaction
+          ? `/api/transactions/${encodeURIComponent(editingTransaction.id)}`
+          : '/api/transactions';
+      const method = isEditing ? 'PUT' : 'POST';
+
+      const response = await fetch(endpoint, {
+        method,
         headers,
         body: JSON.stringify({
           accountId: cuentaOrigenId,
+          destinationAccountId: tipo === 'transferencia' ? cuentaDestinoId : undefined,
           date: fecha,
           amount: numericAmount,
           currency: moneda,
-          categoryType: categoryTypeMap[tipo],
+          categoryType,
           categoryName,
           subCategoryName: subcategoria.trim(),
           description: descripcion.trim() || null,
@@ -168,7 +425,12 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
 
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.error || 'No se pudo guardar la transacción en Neon DB.');
+        throw new Error(
+          result.error ||
+            (isEditing
+              ? 'No se pudo actualizar la transacción en Neon DB.'
+              : 'No se pudo guardar la transacción en Neon DB.')
+        );
       }
 
       const payload: TransactionPayload = {
@@ -177,6 +439,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
         moneda,
         fecha,
         cuentaOrigenId,
+        cuentaDestinoId: tipo === 'transferencia' ? cuentaDestinoId : undefined,
         categoriaMacroId: categoryName,
         subcategoria: subcategoria.trim(),
         descripcion: descripcion.trim(),
@@ -192,7 +455,12 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       if (onSubmitSuccess) onSubmitSuccess(payload);
     } catch (err) {
       setErrors({
-        submit: err instanceof Error ? err.message : 'Error al registrar la transacción.',
+        submit:
+          err instanceof Error
+            ? err.message
+            : isEditing
+              ? 'Error al actualizar la transacción.'
+              : 'Error al registrar la transacción.',
       });
     } finally {
       setIsLoading(false);
@@ -217,7 +485,9 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
             </div>
             <div>
               <h2 id="tx-form-title" className={styles.modalTitle}>
-                Registrar Movimiento en Flujo de Caja
+                {isEditing
+                  ? 'Editar Movimiento en Flujo de Caja'
+                  : 'Registrar Movimiento en Flujo de Caja'}
               </h2>
               <p className={styles.modalSubtitle}>Sincronización directa con Neon PostgreSQL</p>
             </div>
@@ -233,10 +503,14 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
               <CheckCircle2 className={styles.successIconEmerald} />
               <div>
                 <h4 className={styles.successTitleEmerald}>
-                  ¡Transacción Registrada Exitosamente!
+                  {isEditing
+                    ? '¡Transacción Actualizada Exitosamente!'
+                    : '¡Transacción Registrada Exitosamente!'}
                 </h4>
                 <p className={styles.successDesc}>
-                  El movimiento ha sido consolidado en Neon DB y el saldo de la cuenta se actualizó.
+                  {isEditing
+                    ? 'Los cambios fueron guardados en Neon DB y el saldo de la cuenta fue reajustado.'
+                    : 'El movimiento ha sido consolidado en Neon DB y el saldo de la cuenta se actualizó.'}
                 </p>
               </div>
             </div>
@@ -246,23 +520,27 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                 <span className={styles.payloadLabelCyan}>
                   <Code2 className={styles.smallIcon} /> Payload Guardado en DB
                 </span>
-                <span className={styles.statusEmerald}>Status: 201 Created</span>
+                <span className={styles.statusEmerald}>
+                  {isEditing ? 'Status: 200 Updated' : 'Status: 201 Created'}
+                </span>
               </div>
               <pre className={styles.payloadPre}>{JSON.stringify(successPayload, null, 2)}</pre>
             </div>
 
             <div className={styles.successActions}>
-              <button
-                type="button"
-                onClick={() => {
-                  setSuccessPayload(null);
-                  setMonto('');
-                  setDescripcion('');
-                }}
-                className={styles.secondaryActionBtn}
-              >
-                Registrar Otro
-              </button>
+              {!isEditing && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSuccessPayload(null);
+                    setMonto('');
+                    setDescripcion('');
+                  }}
+                  className={styles.secondaryActionBtn}
+                >
+                  Registrar Otro
+                </button>
+              )}
               <button type="button" onClick={onClose} className={styles.doneBtnEmerald}>
                 Listo / Volver al Canvas
               </button>
@@ -273,10 +551,10 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
             {/* Tipo de Transacción (Segmented Control) */}
             <div>
               <label className={styles.labelSpaced}>Tipo de Transacción</label>
-              <div className={styles.segmentedGrid}>
+              <div className={styles.segmentedGridFour}>
                 <button
                   type="button"
-                  onClick={() => setTipo('gasto')}
+                  onClick={() => handleTipoChange('gasto')}
                   className={`${styles.segBtn} ${
                     tipo === 'gasto' ? styles.segBtnActiveRose : ''
                   }`}
@@ -285,7 +563,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTipo('ingreso')}
+                  onClick={() => handleTipoChange('ingreso')}
                   className={`${styles.segBtn} ${
                     tipo === 'ingreso' ? styles.segBtnActiveEmerald : ''
                   }`}
@@ -294,12 +572,21 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTipo('ahorro_inversion')}
+                  onClick={() => handleTipoChange('ahorro_inversion')}
                   className={`${styles.segBtn} ${
                     tipo === 'ahorro_inversion' ? styles.segBtnActiveCyan : ''
                   }`}
                 >
                   Ahorro / Inversión
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTipoChange('transferencia')}
+                  className={`${styles.segBtn} ${
+                    tipo === 'transferencia' ? styles.segBtnActivePurple : ''
+                  }`}
+                >
+                  Pago TC / Traspaso
                 </button>
               </div>
             </div>
@@ -370,13 +657,20 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
 
               <div>
                 <label htmlFor="tx-cuenta" className={styles.label}>
-                  Cuenta / Billetera
+                  {tipo === 'transferencia'
+                    ? 'Cuenta Origen (De donde sale el pago)'
+                    : 'Cuenta / Billetera / Tarjeta'}
                 </label>
                 <select
                   id="tx-cuenta"
                   name="cuentaOrigenId"
                   value={cuentaOrigenId}
-                  onChange={(e) => setCuentaOrigenId(e.target.value as AccountSource)}
+                  onChange={(e) => {
+                    setCuentaOrigenId(e.target.value as AccountSource);
+                    if (errors.cuentaDestinoId) {
+                      setErrors((prev) => ({ ...prev, cuentaDestinoId: '' }));
+                    }
+                  }}
                   className={styles.input}
                 >
                   {accounts.length > 0 ? (
@@ -397,32 +691,63 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
               </div>
             </div>
 
+            {tipo === 'transferencia' && (
+              <div>
+                <label htmlFor="tx-cuenta-destino" className={styles.label}>
+                  Cuenta Destino / Tarjeta a Pagar <span className={styles.requiredStar}>*</span>
+                </label>
+                <select
+                  id="tx-cuenta-destino"
+                  name="cuentaDestinoId"
+                  value={cuentaDestinoId}
+                  onChange={(e) => {
+                    setCuentaDestinoId(e.target.value as AccountSource);
+                    if (errors.cuentaDestinoId) {
+                      setErrors((prev) => ({ ...prev, cuentaDestinoId: '' }));
+                    }
+                  }}
+                  aria-invalid={!!errors.cuentaDestinoId}
+                  className={styles.inputPurple}
+                >
+                  {accounts.length > 0 ? (
+                    accounts.map((acc) => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} ({acc.type} - {acc.currency})
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="TC Nu">TC Nu - Tarjeta de crédito</option>
+                      <option value="Cuenta Nu COP">Cuenta Nu COP - Bancos COP</option>
+                    </>
+                  )}
+                </select>
+                {errors.cuentaDestinoId && (
+                  <p className={styles.errorText}>
+                    <AlertCircle className={styles.errorIcon} /> {errors.cuentaDestinoId}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Categoría Macro y Subcategoría */}
             <div className={styles.gridTwoCols}>
               <div>
                 <label htmlFor="tx-macro" className={styles.label}>
-                  Categoría Macro
+                  Categoría
                 </label>
                 <select
                   id="tx-macro"
                   name="categoriaMacroId"
-                  value={categoriaMacroId}
-                  onChange={(e) => setCategoriaMacroId(e.target.value)}
+                  value={selectedCategoryGroup?.name || ''}
+                  onChange={(e) => handleCategoryChange(e.target.value)}
                   className={styles.input}
                 >
-                  <option value="alimentacion">Alimentación</option>
-                  <option value="apartamentos">Apartamentos</option>
-                  <option value="transporte">Transporte</option>
-                  <option value="hogar">Hogar</option>
-                  <option value="entretenimiento">Entretenimiento</option>
-                  <option value="trabajo">Trabajo / Ingresos</option>
-                  <option value="juegos">Juegos</option>
-                  <option value="mercado">Mercado</option>
-                  <option value="compras">Compras</option>
-                  <option value="salud">Salud</option>
-                  <option value="mascotas">Mascotas</option>
-                  <option value="donaciones">Donaciones</option>
-                  <option value="otros">Otros / Varios</option>
+                  {availableCategories.map((cat) => (
+                    <option key={cat.name} value={cat.name}>
+                      {cat.name}
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -430,11 +755,9 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                 <label htmlFor="tx-subcat" className={styles.label}>
                   Subcategoría Específica <span className={styles.requiredStar}>*</span>
                 </label>
-                <input
+                <select
                   id="tx-subcat"
                   name="subcategoria"
-                  type="text"
-                  placeholder="ej. Mercado, Streaming, Cuota apto"
                   value={subcategoria}
                   onChange={(e) => {
                     setSubcategoria(e.target.value);
@@ -442,7 +765,13 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                   }}
                   aria-invalid={!!errors.subcategoria}
                   className={styles.input}
-                />
+                >
+                  {availableSubcategories.map((sub) => (
+                    <option key={sub} value={sub}>
+                      {sub}
+                    </option>
+                  ))}
+                </select>
                 {errors.subcategoria && (
                   <p className={styles.errorText}>
                     <AlertCircle className={styles.errorIcon} /> {errors.subcategoria}
@@ -505,7 +834,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                   </>
                 ) : (
                   <>
-                    <span>Confirmar Movimiento</span>
+                    <span>{isEditing ? 'Guardar Cambios' : 'Confirmar Movimiento'}</span>
                     <ArrowRight className={styles.arrowIcon} />
                   </>
                 )}
@@ -550,6 +879,13 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [successPayload, setSuccessPayload] = useState<AssetLiabilityPayload | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSuccessPayload(null);
+      setErrors({});
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -921,6 +1257,9 @@ interface PeriodConfigFormProps {
   isOpen: boolean;
   onClose: () => void;
   initialTrm?: number;
+  initialPeriod?: string;
+  initialSavingsGoal?: number;
+  availableMonths?: string[];
   onSubmitSuccess?: (payload: PeriodConfigPayload) => void;
 }
 
@@ -928,12 +1267,24 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
   isOpen,
   onClose,
   initialTrm = 3303.16,
+  initialPeriod = 'ALL',
+  initialSavingsGoal = 20,
+  availableMonths = [],
   onSubmitSuccess,
 }) => {
   const queryClient = useQueryClient();
-  const [periodoMesAno, setPeriodoMesAno] = useState<string>('2026-09');
+  const [modoPeriodo, setModoPeriodo] = useState<'ALL' | 'MONTH'>(
+    initialPeriod === 'ALL' ? 'ALL' : 'MONTH'
+  );
+  const [periodoMesAno, setPeriodoMesAno] = useState<string>(
+    initialPeriod && initialPeriod !== 'ALL'
+      ? initialPeriod
+      : availableMonths[availableMonths.length - 1] || '2026-10'
+  );
   const [trmOficialCopUsd, setTrmOficialCopUsd] = useState<string>(String(initialTrm));
-  const [tasaAhorroMetaPorcentaje, setTasaAhorroMetaPorcentaje] = useState<string>('20');
+  const [tasaAhorroMetaPorcentaje, setTasaAhorroMetaPorcentaje] = useState<string>(
+    String(initialSavingsGoal)
+  );
   const [limiteGastosPresupuestoCop, setLimiteGastosPresupuestoCop] = useState<string>('8000000');
   const [sincronizarConCalcData, setSincronizarConCalcData] = useState<boolean>(true);
   const [observacionesCierre, setObservacionesCierre] = useState<string>('');
@@ -947,6 +1298,19 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
       setTrmOficialCopUsd(String(initialTrm));
     }
   }, [initialTrm]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSuccessPayload(null);
+      setErrors({});
+      setModoPeriodo(initialPeriod === 'ALL' ? 'ALL' : 'MONTH');
+      if (initialPeriod && initialPeriod !== 'ALL') {
+        setPeriodoMesAno(initialPeriod);
+      } else if (availableMonths.length > 0 && !periodoMesAno) {
+        setPeriodoMesAno(availableMonths[availableMonths.length - 1]);
+      }
+    }
+  }, [isOpen, initialPeriod]);
 
   if (!isOpen) return null;
 
@@ -977,8 +1341,10 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
     setSuccessPayload(null);
     setErrors({});
 
+    const effectivePeriod = modoPeriodo === 'ALL' ? 'ALL' : periodoMesAno;
+
     const payload: PeriodConfigPayload = {
-      periodoMesAno,
+      periodoMesAno: effectivePeriod,
       trmOficialCopUsd: parseFloat(trmOficialCopUsd),
       tasaAhorroMetaPorcentaje: parseFloat(tasaAhorroMetaPorcentaje),
       limiteGastosPresupuestoCop: parseFloat(limiteGastosPresupuestoCop) || 0,
@@ -1011,6 +1377,12 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
     }
   };
 
+  const handleClose = () => {
+    setSuccessPayload(null);
+    setErrors({});
+    onClose();
+  };
+
   return (
     <div className={styles.overlay}>
       <div
@@ -1031,11 +1403,11 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
                 Configurar Período, Metas & TRM
               </h2>
               <p className={styles.modalSubtitle}>
-                Parámetros del motor de consolidación financiera
+                Filtra el Dashboard por mes o acumulado anual y ajusta la TRM
               </p>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Cerrar modal" className={styles.closeBtn}>
+          <button onClick={handleClose} aria-label="Cerrar modal" className={styles.closeBtn}>
             <X className={styles.closeIcon} />
           </button>
         </div>
@@ -1047,8 +1419,13 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
               <div>
                 <h4 className={styles.successTitlePurple}>¡Período y TRM Sincronizados!</h4>
                 <p className={styles.successDesc}>
-                  Las cuentas en dólares y el valor consolidado se actualizaron en user_settings con
-                  la nueva TRM (${successPayload.trmOficialCopUsd} COP).
+                  El Dashboard ahora muestra el período{' '}
+                  <strong>
+                    {successPayload.periodoMesAno === 'ALL'
+                      ? 'Todo el Año (Acumulado)'
+                      : successPayload.periodoMesAno}
+                  </strong>{' '}
+                  y se actualizó la TRM (${successPayload.trmOficialCopUsd} COP) en Neon DB.
                 </p>
               </div>
             </div>
@@ -1056,7 +1433,7 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
             <div className={styles.payloadBox}>
               <div className={styles.payloadHeader}>
                 <span className={styles.payloadLabelPurple}>
-                  <Code2 className={styles.smallIcon} /> Payload Guardado en DB
+                  <Code2 className={styles.smallIcon} /> Payload Aplicado
                 </span>
                 <span className={styles.statusPurple}>Status: 200 OK</span>
               </div>
@@ -1064,25 +1441,66 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
             </div>
 
             <div className={styles.successActions}>
-              <button type="button" onClick={onClose} className={styles.doneBtnPurple}>
+              <button
+                type="button"
+                onClick={() => setSuccessPayload(null)}
+                className={styles.secondaryActionBtn}
+              >
+                Cambiar Otro Período
+              </button>
+              <button type="button" onClick={handleClose} className={styles.doneBtnPurple}>
                 Aplicar y Ver Dashboard
               </button>
             </div>
           </div>
         ) : (
           <form onSubmit={handleSubmit} noValidate className={styles.form}>
+            <div>
+              <label className={styles.labelSpaced}>Alcance del Período en el Dashboard</label>
+              <div className={styles.gridTwoCols}>
+                <button
+                  type="button"
+                  onClick={() => setModoPeriodo('ALL')}
+                  className={`${styles.segBtn} ${
+                    modoPeriodo === 'ALL' ? styles.segBtnActivePurple : ''
+                  }`}
+                >
+                  Todo el Año (Acumulado 2026)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModoPeriodo('MONTH')}
+                  className={`${styles.segBtn} ${
+                    modoPeriodo === 'MONTH' ? styles.segBtnActivePurple : ''
+                  }`}
+                >
+                  Filtrar un Mes Específico
+                </button>
+              </div>
+            </div>
+
             <div className={styles.gridTwoCols}>
               <div>
                 <label htmlFor="cfg-periodo" className={styles.label}>
-                  Mes / Período
+                  {modoPeriodo === 'ALL' ? 'Período Seleccionado' : 'Mes / Período a Consultar'}
                 </label>
-                <input
-                  id="cfg-periodo"
-                  type="month"
-                  value={periodoMesAno}
-                  onChange={(e) => setPeriodoMesAno(e.target.value)}
-                  className={styles.inputMonoPurple}
-                />
+                {modoPeriodo === 'ALL' ? (
+                  <input
+                    id="cfg-periodo"
+                    type="text"
+                    disabled
+                    value="Todo el Año (2026)"
+                    className={styles.inputMonoPurple}
+                  />
+                ) : (
+                  <input
+                    id="cfg-periodo"
+                    type="month"
+                    value={periodoMesAno}
+                    onChange={(e) => setPeriodoMesAno(e.target.value)}
+                    className={styles.inputMonoPurple}
+                  />
+                )}
               </div>
 
               <div>
@@ -1187,7 +1605,7 @@ export const PeriodConfigFormModal: React.FC<PeriodConfigFormProps> = ({
             <div className={styles.footerActions}>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleClose}
                 disabled={isLoading}
                 className={styles.cancelBtn}
               >
@@ -1240,7 +1658,16 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [successPayload, setSuccessPayload] = useState<AccountPayload | null>(null);
 
+  useEffect(() => {
+    if (isOpen) {
+      setSuccessPayload(null);
+      setErrors({});
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const isCreditCard = type === 'Tarjeta de crédito';
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -1250,8 +1677,10 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
     }
 
     const numericBalance = parseFloat(initialBalance);
-    if (initialBalance === '' || isNaN(numericBalance) || numericBalance < 0) {
-      newErrors.initialBalance = 'El saldo inicial / actual debe ser un número mayor o igual a 0.';
+    if (initialBalance === '' || isNaN(numericBalance) || (!isCreditCard && numericBalance < 0)) {
+      newErrors.initialBalance = isCreditCard
+        ? 'Ingresa la deuda actual de la tarjeta (0 si está al día).'
+        : 'El saldo inicial / actual debe ser un número mayor o igual a 0.';
     }
 
     setErrors(newErrors);
@@ -1266,7 +1695,12 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
     setSuccessPayload(null);
     setErrors({});
 
-    const numericBalance = parseFloat(initialBalance);
+    const rawBalance = parseFloat(initialBalance);
+    const numericBalance = isCreditCard
+      ? rawBalance === 0
+        ? 0
+        : -Math.abs(rawBalance)
+      : rawBalance;
 
     try {
       const headers = await buildAuthHeaders();
@@ -1323,7 +1757,7 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
             </div>
             <div>
               <h2 id="account-form-title" className={styles.modalTitle}>
-                Crear Nueva Cuenta / Billetera
+                Crear Nueva Cuenta / Billetera / TC
               </h2>
               <p className={styles.modalSubtitle}>
                 Define el nombre, tipo, moneda y saldo actual en Neon DB
@@ -1343,7 +1777,7 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
                 <h4 className={styles.successTitleEmerald}>¡Cuenta Creada Exitosamente!</h4>
                 <p className={styles.successDesc}>
                   La cuenta <strong>{successPayload.name}</strong> ya está disponible para registrar
-                  movimientos y se sumó a la liquidez del Canvas.
+                  movimientos en el Canvas.
                 </p>
               </div>
             </div>
@@ -1385,7 +1819,11 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
                 <input
                   id="acc-name"
                   type="text"
-                  placeholder="ej. Cuenta Nu COP, Billetera Nequi, Efectivo"
+                  placeholder={
+                    isCreditCard
+                      ? 'ej. TC Nu, TC Bancolombia'
+                      : 'ej. Cuenta Nu COP, Billetera Nequi, Efectivo'
+                  }
                   value={name}
                   onChange={(e) => {
                     setName(e.target.value);
@@ -1415,6 +1853,7 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
                   <option value="Billetera Digital">Billetera Digital (Nequi / Daviplata)</option>
                   <option value="Efectivo">Efectivo Físico (Caja en mano)</option>
                   <option value="Ahorro">Cuenta de Ahorro (Cajitas / Bolsillos)</option>
+                  <option value="Tarjeta de crédito">Tarjeta de Crédito (Cupo / Deuda)</option>
                   <option value="Broker">Broker Internacional / Acciones</option>
                   <option value="Inversión">Fondo de Inversión</option>
                 </select>
@@ -1424,14 +1863,17 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
             <div className={styles.gridAmountRow}>
               <div className={styles.colSpan2}>
                 <label htmlFor="acc-balance" className={styles.label}>
-                  Saldo Inicial / Valor Actual <span className={styles.requiredStar}>*</span>
+                  {isCreditCard
+                    ? 'Deuda Actual en la Tarjeta (0 si está al día)'
+                    : 'Saldo Inicial / Valor Actual'}{' '}
+                  <span className={styles.requiredStar}>*</span>
                 </label>
                 <input
                   id="acc-balance"
                   type="number"
                   step="0.01"
-                  min="0"
-                  placeholder="ej. 1000000"
+                  min={isCreditCard ? undefined : '0'}
+                  placeholder={isCreditCard ? 'ej. 0 (se registra en negativo si debes)' : 'ej. 1000000'}
                   value={initialBalance}
                   onChange={(e) => {
                     setInitialBalance(e.target.value);
