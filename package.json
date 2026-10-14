@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "vite",
-    "dev:api": "node --import ./node_modules/jiti/lib/jiti-register.mjs --env-file=.env --watch api/index.ts",
+    "dev": "trap 'kill 0' INT TERM; npm run dev:api & npm run dev:fe & wait",
+    "dev:fe": "vite",
+    "dev:api": "node --import ./node_modules/jiti/lib/jiti-register.mjs --env-file=.env --watch-path=api api/index.ts",
     "build": "tsc --module ESNext --moduleResolution Bundler && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "sync:transactions": "node --env-file=.env .agents/skills/sync-transactions/scripts/sync_transactions.mjs"
   },
   "dependencies": {
     "@neon/config": "^1.8.3",

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { auth } from '../lib/firebaseClient';
 import {
   TransactionFormModal,
@@ -18,6 +18,8 @@ import {
   Plus,
   LogOut,
   Building,
+  Trash2,
+  Pencil,
 } from 'lucide-react';
 import styles from './Canvas.module.css';
 
@@ -70,11 +72,35 @@ interface PortfolioRecord {
   currency: string;
 }
 
+interface TaxonomySubcategoryRecord {
+  name: string;
+  amount: string | number;
+  transactions_count: number;
+}
+
 interface TaxonomyRecord {
   category_name: string;
   category_type: string;
   subcategories_count: number;
   amount: string;
+  subcategories?: TaxonomySubcategoryRecord[];
+}
+
+interface TransactionRecord {
+  id: string;
+  date: string;
+  month: string;
+  description: string;
+  amount: string;
+  currency: string;
+  category_type: string;
+  category_name: string;
+  sub_category_name: string;
+  account_id: string;
+  account_name: string;
+  destination_account_id: string | null;
+  destination_account_name: string | null;
+  is_recurring?: boolean;
 }
 
 interface CanvasDashboardResponse {
@@ -88,11 +114,12 @@ interface CanvasDashboardResponse {
   monthlyCanvas: MonthlyCanvasRecord[];
   portfolio: PortfolioRecord[];
   taxonomy: TaxonomyRecord[];
+  transactions: TransactionRecord[];
 }
 
 const CATEGORY_COLORS = [
   '#10b981',
-  '#06b6d4',
+  '#06b9d4',
   '#a855f7',
   '#f59e0b',
   '#f43f5e',
@@ -149,8 +176,37 @@ function formatMonthLabel(yyyyMm: string): string {
   return `${monthName} ${year}`;
 }
 
+function formatCategoryTypeLabel(type: string): string {
+  switch (type) {
+    case 'INGRESO_FIJO':
+      return 'Ingreso Fijo';
+    case 'INGRESO_VARIABLE':
+      return 'Ingreso Variable';
+    case 'GASTO':
+      return 'Gasto';
+    case 'AHORRO':
+      return 'Ahorro';
+    case 'INVERSION':
+      return 'Inversión';
+    case 'TRANSFERENCIA':
+      return 'Transferencia';
+    default:
+      return type;
+  }
+}
+
 export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }) => {
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'resumen' | 'taxonomia' | 'mensual'>('resumen');
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
+  const [savingsGoalPct, setSavingsGoalPct] = useState<number>(20);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  const [selectedSubcategoryName, setSelectedSubcategoryName] = useState<string | null>(null);
+  const [selectedFlowMonth, setSelectedFlowMonth] = useState<string | null>(null);
+  const [confirmDeleteTxId, setConfirmDeleteTxId] = useState<string | null>(null);
+  const [deletingTxId, setDeletingTxId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [editingTransaction, setEditingTransaction] = useState<TransactionRecord | null>(null);
 
   // Modals state
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
@@ -160,8 +216,42 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
 
+  const handleDeleteTransaction = async (txId: string) => {
+    try {
+      setDeletingTxId(txId);
+      setDeleteError(null);
+      const token = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      if (effectiveUserId) {
+        headers['x-user-id'] = effectiveUserId;
+      }
+
+      const res = await fetch(`/api/transactions/${encodeURIComponent(txId)}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'No se pudo eliminar la transacción.');
+      }
+
+      setConfirmDeleteTxId(null);
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error ? err.message : 'Error inesperado al eliminar la transacción.'
+      );
+    } finally {
+      setDeletingTxId(null);
+    }
+  };
+
   const { data, isLoading, error } = useQuery<CanvasDashboardResponse>({
-    queryKey: ['canvas-dashboard', effectiveUserId],
+    queryKey: ['canvas-dashboard', effectiveUserId, selectedPeriod],
     queryFn: async () => {
       const token = await auth.currentUser?.getIdToken();
       const headers: Record<string, string> = {};
@@ -172,7 +262,11 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         headers['x-user-id'] = effectiveUserId;
       }
 
-      const res = await fetch('/api/canvas-dashboard', { headers });
+      const querySuffix =
+        selectedPeriod && selectedPeriod !== 'ALL'
+          ? `?month=${encodeURIComponent(selectedPeriod)}`
+          : '';
+      const res = await fetch(`/api/canvas-dashboard${querySuffix}`, { headers });
       if (!res.ok) {
         throw new Error('No se pudieron cargar los datos financieros desde Neon PostgreSQL.');
       }
@@ -186,12 +280,26 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const monthlyRows = data?.monthlyCanvas || [];
   const portfolio = data?.portfolio || [];
   const taxonomyRows = data?.taxonomy || [];
+  const allTransactions = data?.transactions || [];
 
-  // 1. Cuentas de liquidez inmediata en COP vs Cuentas en USD / Ahorro / Inversión
+  const periodLabel =
+    selectedPeriod === 'ALL' ? 'Todo el Año (2026)' : formatMonthLabel(selectedPeriod);
+
+  const filteredMonthlyRows =
+    selectedPeriod === 'ALL'
+      ? monthlyRows
+      : monthlyRows.filter((row) => row.month === selectedPeriod);
+
+  // 1. Cuentas de liquidez inmediata en COP vs Tarjetas de Crédito vs USD / Ahorro / Inversión
+  const isCreditCardType = (type: string) =>
+    ['tarjeta de crédito', 'tarjeta de credito'].includes(type.toLowerCase());
+
+  const creditCardAccounts = accounts.filter((acc) => isCreditCardType(acc.type));
   const copLiquidAccounts = accounts.filter(
     (acc) =>
       acc.currency === 'COP' &&
-      !['ahorro', 'inversión', 'inversion', 'broker'].includes(acc.type.toLowerCase())
+      !['ahorro', 'inversión', 'inversion', 'broker'].includes(acc.type.toLowerCase()) &&
+      !isCreditCardType(acc.type)
   );
   const copSavingsAccounts = accounts.filter(
     (acc) => acc.currency === 'COP' && acc.type.toLowerCase() === 'ahorro'
@@ -201,27 +309,29 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       acc.currency === 'COP' &&
       ['inversión', 'inversion', 'broker'].includes(acc.type.toLowerCase())
   );
-  const usdAccounts = accounts.filter((acc) => acc.currency === 'USD');
+  const usdAccounts = accounts.filter(
+    (acc) => acc.currency === 'USD' && !isCreditCardType(acc.type)
+  );
 
   const totalImmediateLiquidityCop = copLiquidAccounts.reduce(
     (sum, acc) => sum + Number(acc.current_balance || 0),
     0
   );
 
-  // 2. Consolidado de Flujo Mensual / Anual (v_monthly_canvas)
-  const totalIncomeYear = monthlyRows.reduce(
+  // 2. Consolidado de Flujo Mensual / Anual (v_monthly_canvas filtrado por selectedPeriod)
+  const totalIncomeYear = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_income || 0),
     0
   );
-  const totalExpensesYear = monthlyRows.reduce(
+  const totalExpensesYear = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_expenses || 0),
     0
   );
-  const totalSavingsTransferred = monthlyRows.reduce(
+  const totalSavingsTransferred = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_savings || 0),
     0
   );
-  const totalInvestmentsTransferred = monthlyRows.reduce(
+  const totalInvestmentsTransferred = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_investments || 0),
     0
   );
@@ -230,12 +340,14 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     totalIncomeYear > 0 ? Number(((netBalanceYear / totalIncomeYear) * 100).toFixed(1)) : 0;
 
   // 3. Estructura Multidivisa (COP / USD)
-  const totalSavingsCop =
-    copSavingsAccounts.reduce((sum, acc) => sum + Number(acc.current_balance || 0), 0) +
-    totalSavingsTransferred;
-  const totalInvestmentCop =
-    copInvestmentAccounts.reduce((sum, acc) => sum + Number(acc.current_balance || 0), 0) +
-    totalInvestmentsTransferred;
+  const totalSavingsCop = copSavingsAccounts.reduce(
+    (sum, acc) => sum + Number(acc.current_balance || 0),
+    0
+  );
+  const totalInvestmentCop = copInvestmentAccounts.reduce(
+    (sum, acc) => sum + Number(acc.current_balance || 0),
+    0
+  );
 
   const totalUsdAccountsBalance = usdAccounts.reduce(
     (sum, acc) => sum + Number(acc.current_balance || 0),
@@ -284,6 +396,19 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     const amount = Number(row.amount || 0);
     const percentage =
       totalTaxonomyAmount > 0 ? Number(((amount / totalTaxonomyAmount) * 100).toFixed(1)) : 0;
+    const color = CATEGORY_COLORS[index % CATEGORY_COLORS.length];
+    const subcategories = (row.subcategories || []).map((sub) => {
+      const subAmount = Number(sub.amount || 0);
+      const subPercentage =
+        amount > 0 ? Number(((subAmount / amount) * 100).toFixed(1)) : 0;
+      return {
+        name: sub.name,
+        amount: subAmount,
+        transactionsCount: Number(sub.transactions_count || 0),
+        percentage: subPercentage,
+      };
+    });
+
     return {
       id: `${row.category_type}-${row.category_name}`,
       name: row.category_name,
@@ -291,9 +416,26 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       subcategoriesCount: row.subcategories_count,
       amount,
       percentage,
-      color: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
+      color,
+      subcategories,
     };
   });
+
+  const selectedCategory =
+    spendingCategories.find((cat) => cat.id === selectedCategoryId) || null;
+  const selectedSubcategory =
+    selectedCategory?.subcategories.find((sub) => sub.name === selectedSubcategoryName) || null;
+
+  const subcategoryTransactions =
+    selectedCategory && selectedSubcategory
+      ? allTransactions.filter(
+          (tx) =>
+            tx.category_name === selectedCategory.name &&
+            tx.category_type === selectedCategory.type &&
+            tx.sub_category_name === selectedSubcategory.name &&
+            (selectedPeriod === 'ALL' || tx.month === selectedPeriod)
+        )
+      : [];
 
   // 6. Flujo Mensual con Balance Acumulado (v_monthly_canvas)
   let runningAccumulated = 0;
@@ -306,6 +448,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     const ahorroMes = Number(row.total_savings || 0) + Number(row.total_investments || 0);
 
     return {
+      rawMonth: row.month,
       month: formatMonthLabel(row.month),
       ingresos,
       gastos,
@@ -315,6 +458,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       ahorroMes,
     };
   });
+
+  const selectedMonthFlowSummary =
+    monthlyCashFlow.find((m) => m.rawMonth === selectedFlowMonth) || null;
+  const selectedMonthTransactions = selectedFlowMonth
+    ? allTransactions.filter((tx) => tx.month === selectedFlowMonth)
+    : [];
 
   const portfolioTickersLabel =
     portfolio.length > 0 ? portfolio.map((p) => p.ticker).join(', ') : 'Sin posiciones';
@@ -326,9 +475,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       {/* Modales Interactivos */}
       <TransactionFormModal
         isOpen={isTxModalOpen}
-        onClose={() => setIsTxModalOpen(false)}
+        onClose={() => {
+          setIsTxModalOpen(false);
+          setEditingTransaction(null);
+        }}
         accounts={accounts}
         trm={trm}
+        editingTransaction={editingTransaction}
       />
       <AccountFormModal
         isOpen={isAccountModalOpen}
@@ -342,6 +495,15 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         isOpen={isPeriodModalOpen}
         onClose={() => setIsPeriodModalOpen(false)}
         initialTrm={trm}
+        initialPeriod={selectedPeriod}
+        initialSavingsGoal={savingsGoalPct}
+        availableMonths={monthlyRows.map((row) => row.month)}
+        onSubmitSuccess={(payload) => {
+          setSelectedPeriod(payload.periodoMesAno || 'ALL');
+          if (Number.isFinite(payload.tasaAhorroMetaPorcentaje)) {
+            setSavingsGoalPct(payload.tasaAhorroMetaPorcentaje);
+          }
+        }}
       />
 
       {/* Top Bar Navigation */}
@@ -367,7 +529,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
 
         {/* Action Controls */}
         <div className={styles.actionControls}>
-          <button onClick={() => setIsTxModalOpen(true)} className={styles.primaryBtn}>
+          <button
+            onClick={() => {
+              setEditingTransaction(null);
+              setIsTxModalOpen(true);
+            }}
+            className={styles.primaryBtn}
+          >
             <Plus className={styles.btnIcon} />
             <span>+ Nueva Transacción</span>
           </button>
@@ -385,7 +553,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           <button onClick={() => setIsPeriodModalOpen(true)} className={styles.periodBtn}>
             <Calendar className={styles.mutedIcon} />
             <span>
-              Período: <strong className={styles.periodStrong}>Todo el Año (2026)</strong>
+              Período: <strong className={styles.periodStrong}>{periodLabel}</strong>
             </span>
           </button>
 
@@ -499,6 +667,31 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     </div>
                   ))}
 
+                  {creditCardAccounts.map((acc) => {
+                    const balance = Number(acc.current_balance || 0);
+                    const hasDebt = balance < 0;
+                    const formattedDebt =
+                      acc.currency === 'USD'
+                        ? formatCurrencyUSD(Math.abs(balance))
+                        : formatCurrencyCOP(Math.abs(balance));
+                    return (
+                      <div
+                        key={acc.id}
+                        className={hasDebt ? styles.subAccountCardRose : styles.subAccountCard}
+                      >
+                        <div className={styles.subAccountLabel}>{acc.name}</div>
+                        <div className={styles.subAccountTitle}>{acc.type}</div>
+                        <div
+                          className={
+                            hasDebt ? styles.subAccountAmountRose : styles.subAccountAmountEmerald
+                          }
+                        >
+                          {hasDebt ? `Deuda Actual: ${formattedDebt}` : `${formattedDebt} (Al día)`}
+                        </div>
+                      </div>
+                    );
+                  })}
+
                   <div className={styles.subAccountCard}>
                     <div className={styles.subAccountLabel}>Cuentas USD / Broker</div>
                     <div className={styles.subAccountTitle}>{usdAccountNamesLabel}</div>
@@ -516,10 +709,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
               </div>
             </div>
 
-            {/* 2. RESUMEN EJECUTIVO • CONSOLIDADO ANUAL 2026 */}
+            {/* 2. RESUMEN EJECUTIVO • PERÍODO O CONSOLIDADO ANUAL */}
             <div className={styles.sectionBlock}>
               <div className={styles.sectionHeading}>
-                <span>Resumen Ejecutivo · Consolidado Anual 2026</span>
+                <span>
+                  Resumen Ejecutivo ·{' '}
+                  {selectedPeriod === 'ALL' ? 'Consolidado Anual 2026' : periodLabel}
+                </span>
               </div>
 
               <div className={styles.kpiGrid5}>
@@ -533,8 +729,11 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                   </div>
                   <div className={styles.kpiValueWhite}>{formatCurrencyCOP(totalIncomeYear)}</div>
                   <div className={styles.kpiMetaEmerald}>
-                    ● Acumulado ({monthlyRows.length}{' '}
-                    {monthlyRows.length === 1 ? 'mes' : 'meses'})
+                    {selectedPeriod === 'ALL'
+                      ? `● Acumulado (${monthlyRows.length} ${
+                          monthlyRows.length === 1 ? 'mes' : 'meses'
+                        })`
+                      : `● Mes (${periodLabel})`}
                   </div>
                 </div>
 
@@ -581,7 +780,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                       style={{ width: `${Math.max(0, Math.min(100, savingsRateYear))}%` }}
                     />
                   </div>
-                  <div className={styles.kpiMetaSmall}>Meta: 20%</div>
+                  <div className={styles.kpiMetaSmall}>Meta: {savingsGoalPct}%</div>
                 </div>
 
                 {/* Patrimonio Neto */}
@@ -754,92 +953,518 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         {/* TAXONOMÍA TAB */}
         {!isLoading && !error && activeTab === 'taxonomia' && (
           <div className={styles.tabContent}>
-            <div className={styles.taxonomyBanner}>
-              <div>
-                <h3 className={styles.taxonomyTitle}>
-                  Taxonomía Completa & Análisis ({totalSubcategoriesCount} Subcategorías)
-                </h3>
-                <p className={styles.taxonomySubtitle}>
-                  Explora el comportamiento mensual por Categoría General sincronizado con Neon DB.
-                </p>
+            {deleteError && (
+              <div className={styles.errorCard}>
+                <span>{deleteError}</span>
               </div>
-              <div>
-                <span className={styles.taxonomyBadge}>
-                  {spendingCategories.length} Categorías Activas
-                </span>
-              </div>
-            </div>
+            )}
 
-            <div className={styles.taxonomyGrid}>
-              {spendingCategories.map((cat) => (
-                <div key={cat.id} className={styles.categoryCard}>
-                  <div className={styles.categoryLeft}>
-                    <span
-                      className={styles.categoryDot}
-                      style={{ backgroundColor: cat.color }}
-                    />
+            {selectedCategory && selectedSubcategory ? (
+              <>
+                <div className={styles.taxonomyBanner}>
+                  <div className={styles.bannerHeaderLeft}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedSubcategoryName(null);
+                        setConfirmDeleteTxId(null);
+                        setDeleteError(null);
+                      }}
+                      className={styles.backBtn}
+                    >
+                      ← Volver a Subcategorías de {selectedCategory.name}
+                    </button>
                     <div>
-                      <div className={styles.categoryName}>{cat.name}</div>
-                      <div className={styles.categorySubcount}>
-                        {cat.subcategoriesCount} subcategoría(s)
-                      </div>
+                      <h3 className={styles.taxonomyTitle}>
+                        {selectedCategory.name} · {selectedSubcategory.name} (
+                        {subcategoryTransactions.length}{' '}
+                        {subcategoryTransactions.length === 1 ? 'movimiento' : 'movimientos'})
+                      </h3>
+                      <p className={styles.taxonomySubtitle}>
+                        Total en {selectedSubcategory.name}:{' '}
+                        <strong>{formatCurrencyCOP(selectedSubcategory.amount)}</strong> (
+                        {selectedSubcategory.percentage}% de {selectedCategory.name} en{' '}
+                        {periodLabel})
+                      </p>
                     </div>
                   </div>
-
-                  <div className={styles.categoryRight}>
-                    <div className={styles.categoryAmount}>{formatCurrencyCOP(cat.amount)}</div>
-                    <div className={styles.categoryPercent} style={{ color: cat.color }}>
-                      {cat.percentage}%
-                    </div>
+                  <div>
+                    <span className={styles.taxonomyBadge}>
+                      {formatCurrencyCOP(selectedSubcategory.amount)}
+                    </span>
                   </div>
                 </div>
-              ))}
-            </div>
+
+                {subcategoryTransactions.length === 0 ? (
+                  <div className={styles.stateCard}>
+                    No hay movimientos registrados en esta subcategoría para {periodLabel}.
+                  </div>
+                ) : (
+                  <div className={styles.tableWrapper}>
+                    <table className={styles.table}>
+                      <thead className={styles.tableHead}>
+                        <tr>
+                          <th className={styles.th}>Fecha</th>
+                          <th className={styles.th}>Descripción</th>
+                          <th className={styles.th}>Cuenta</th>
+                          <th className={styles.thRight}>Monto</th>
+                          <th className={styles.thRight}>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className={styles.tableBody}>
+                        {subcategoryTransactions.map((tx) => {
+                          const txAmount = Number(tx.amount || 0);
+                          const isConfirming = confirmDeleteTxId === tx.id;
+                          const isDeleting = deletingTxId === tx.id;
+                          const accountLabel = tx.destination_account_name
+                            ? `${tx.account_name} → ${tx.destination_account_name}`
+                            : tx.account_name;
+
+                          return (
+                            <tr key={tx.id} className={styles.tr}>
+                              <td className={styles.tdDate}>{tx.date}</td>
+                              <td className={styles.tdMonth}>
+                                {tx.description || selectedSubcategory.name}
+                              </td>
+                              <td className={styles.tdAccount}>{accountLabel}</td>
+                              <td className={styles.tdExpense}>
+                                -{formatCurrencyCOP(txAmount)}
+                              </td>
+                              <td className={styles.tdAction}>
+                                {isConfirming ? (
+                                  <div className={styles.confirmActionGroup}>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => handleDeleteTransaction(tx.id)}
+                                      className={styles.confirmDeleteBtn}
+                                    >
+                                      {isDeleting ? 'Eliminando...' : 'Confirmar'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => setConfirmDeleteTxId(null)}
+                                      className={styles.cancelDeleteBtn}
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className={styles.actionBtnGroup}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingTransaction(tx);
+                                        setIsTxModalOpen(true);
+                                      }}
+                                      className={styles.editTxBtn}
+                                      title="Editar movimiento y ajustar saldo en cuenta"
+                                    >
+                                      <Pencil className={styles.deleteIcon} />
+                                      <span>Editar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteTxId(tx.id)}
+                                      className={styles.deleteTxBtn}
+                                      title="Eliminar movimiento y revertir saldo en cuenta"
+                                    >
+                                      <Trash2 className={styles.deleteIcon} />
+                                      <span>Eliminar</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            ) : selectedCategory ? (
+              <>
+                <div className={styles.taxonomyBanner}>
+                  <div className={styles.bannerHeaderLeft}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedCategoryId(null);
+                        setSelectedSubcategoryName(null);
+                        setConfirmDeleteTxId(null);
+                        setDeleteError(null);
+                      }}
+                      className={styles.backBtn}
+                    >
+                      ← Volver a Categorías
+                    </button>
+                    <div>
+                      <h3 className={styles.taxonomyTitle}>
+                        {selectedCategory.name} ({selectedCategory.subcategories.length}{' '}
+                        Subcategorías)
+                      </h3>
+                      <p className={styles.taxonomySubtitle}>
+                        Haz clic en una subcategoría para ver o eliminar sus movimientos · Total:{' '}
+                        <strong>{formatCurrencyCOP(selectedCategory.amount)}</strong> (
+                        {selectedCategory.percentage}% en {periodLabel})
+                      </p>
+                    </div>
+                  </div>
+                  <div>
+                    <span className={styles.taxonomyBadge}>
+                      {formatCurrencyCOP(selectedCategory.amount)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className={styles.taxonomyGrid}>
+                  {selectedCategory.subcategories.map((sub) => (
+                    <button
+                      key={sub.name}
+                      type="button"
+                      onClick={() => {
+                        setSelectedSubcategoryName(sub.name);
+                        setConfirmDeleteTxId(null);
+                        setDeleteError(null);
+                      }}
+                      className={styles.subcategoryCardBtn}
+                    >
+                      <div className={styles.subcategoryTopRow}>
+                        <div className={styles.categoryLeft}>
+                          <span
+                            className={styles.categoryDot}
+                            style={{ backgroundColor: selectedCategory.color }}
+                          />
+                          <div>
+                            <div className={styles.categoryName}>{sub.name}</div>
+                            <div className={styles.categorySubcount}>
+                              {sub.transactionsCount}{' '}
+                              {sub.transactionsCount === 1 ? 'movimiento' : 'movimientos'} · Ver
+                              registros →
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className={styles.categoryRight}>
+                          <div className={styles.categoryAmount}>
+                            {formatCurrencyCOP(sub.amount)}
+                          </div>
+                          <div
+                            className={styles.categoryPercent}
+                            style={{ color: selectedCategory.color }}
+                          >
+                            {sub.percentage}%
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className={styles.progressTrack}>
+                        <div
+                          className={styles.progressFillCyan}
+                          style={{
+                            width: `${Math.max(0, Math.min(100, sub.percentage))}%`,
+                            backgroundColor: selectedCategory.color,
+                          }}
+                        />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className={styles.taxonomyBanner}>
+                  <div>
+                    <h3 className={styles.taxonomyTitle}>
+                      Taxonomía Completa & Análisis ({totalSubcategoriesCount} Subcategorías)
+                    </h3>
+                    <p className={styles.taxonomySubtitle}>
+                      Haz clic en cualquier categoría para ver el desglose detallado de sus
+                      subcategorías ({periodLabel}).
+                    </p>
+                  </div>
+                  <div>
+                    <span className={styles.taxonomyBadge}>
+                      {spendingCategories.length} Categorías Activas
+                    </span>
+                  </div>
+                </div>
+
+                <div className={styles.taxonomyGrid}>
+                  {spendingCategories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedCategoryId(cat.id);
+                        setSelectedSubcategoryName(null);
+                        setConfirmDeleteTxId(null);
+                        setDeleteError(null);
+                      }}
+                      className={styles.categoryCardBtn}
+                    >
+                      <div className={styles.categoryLeft}>
+                        <span
+                          className={styles.categoryDot}
+                          style={{ backgroundColor: cat.color }}
+                        />
+                        <div>
+                          <div className={styles.categoryName}>{cat.name}</div>
+                          <div className={styles.categorySubcount}>
+                            {cat.subcategoriesCount} subcategoría(s) · Ver detalle →
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className={styles.categoryRight}>
+                        <div className={styles.categoryAmount}>{formatCurrencyCOP(cat.amount)}</div>
+                        <div className={styles.categoryPercent} style={{ color: cat.color }}>
+                          {cat.percentage}%
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
 
         {/* REGISTRO MENSUAL TAB */}
         {!isLoading && !error && activeTab === 'mensual' && (
           <div className={styles.tabContent}>
-            <div className={styles.monthlyBanner}>
-              <h3 className={styles.taxonomyTitle}>Registro Mensual de Flujo de Caja</h3>
-              <p className={styles.taxonomySubtitle}>
-                Detalle del período desde la vista calculada v_monthly_canvas en PostgreSQL
-              </p>
-            </div>
+            {deleteError && (
+              <div className={styles.errorCard}>
+                <span>{deleteError}</span>
+              </div>
+            )}
 
-            <div className={styles.tableWrapper}>
-              <table className={styles.table}>
-                <thead className={styles.tableHead}>
-                  <tr>
-                    <th className={styles.th}>Mes</th>
-                    <th className={styles.thRight}>Ingresos</th>
-                    <th className={styles.thRight}>Gastos</th>
-                    <th className={styles.thRight}>Balance Mes</th>
-                    <th className={styles.thRight}>Tasa Ahorro</th>
-                    <th className={styles.thRight}>Balance Acumulado</th>
-                    <th className={styles.thRight}>Ahorro (Mes)</th>
-                  </tr>
-                </thead>
-                <tbody className={styles.tableBody}>
-                  {monthlyCashFlow.map((row) => (
-                    <tr key={row.month} className={styles.tr}>
-                      <td className={styles.tdMonth}>{row.month}</td>
-                      <td className={styles.tdIncome}>{formatCurrencyCOP(row.ingresos)}</td>
-                      <td className={styles.tdExpense}>{formatCurrencyCOP(row.gastos)}</td>
-                      <td className={styles.tdBalance}>{formatCurrencyCOP(row.balanceMes)}</td>
-                      <td className={styles.tdRate}>
-                        {row.tasaAhorro > 0 ? `${row.tasaAhorro}%` : '0.0%'}
-                      </td>
-                      <td className={styles.tdAccumulated}>
-                        {formatCurrencyCOP(row.balanceAcumulado)}
-                      </td>
-                      <td className={styles.tdSavings}>{formatCurrencyCOP(row.ahorroMes)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {selectedFlowMonth ? (
+              <>
+                <div className={styles.taxonomyBanner}>
+                  <div className={styles.bannerHeaderLeft}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedFlowMonth(null);
+                        setConfirmDeleteTxId(null);
+                        setDeleteError(null);
+                      }}
+                      className={styles.backBtn}
+                    >
+                      ← Volver a Registro Mensual
+                    </button>
+                    <div>
+                      <h3 className={styles.taxonomyTitle}>
+                        Movimientos de {formatMonthLabel(selectedFlowMonth)} (
+                        {selectedMonthTransactions.length}{' '}
+                        {selectedMonthTransactions.length === 1 ? 'registro' : 'registros'})
+                      </h3>
+                      {selectedMonthFlowSummary && (
+                        <p className={styles.taxonomySubtitle}>
+                          Ingresos:{' '}
+                          <strong className={styles.monoEmerald}>
+                            {formatCurrencyCOP(selectedMonthFlowSummary.ingresos)}
+                          </strong>{' '}
+                          · Gastos:{' '}
+                          <strong className={styles.monoRose}>
+                            {formatCurrencyCOP(selectedMonthFlowSummary.gastos)}
+                          </strong>{' '}
+                          · Balance:{' '}
+                          <strong className={styles.monoCyan}>
+                            {formatCurrencyCOP(selectedMonthFlowSummary.balanceMes)}
+                          </strong>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <span className={styles.taxonomyBadge}>
+                      {formatMonthLabel(selectedFlowMonth)}
+                    </span>
+                  </div>
+                </div>
+
+                {selectedMonthTransactions.length === 0 ? (
+                  <div className={styles.stateCard}>
+                    No hay movimientos registrados en {formatMonthLabel(selectedFlowMonth)}.
+                  </div>
+                ) : (
+                  <div className={styles.tableWrapper}>
+                    <table className={styles.table}>
+                      <thead className={styles.tableHead}>
+                        <tr>
+                          <th className={styles.th}>Fecha</th>
+                          <th className={styles.th}>Descripción</th>
+                          <th className={styles.th}>Categoría / Subcategoría</th>
+                          <th className={styles.th}>Tipo</th>
+                          <th className={styles.th}>Cuenta</th>
+                          <th className={styles.thRight}>Monto</th>
+                          <th className={styles.thRight}>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className={styles.tableBody}>
+                        {selectedMonthTransactions.map((tx) => {
+                          const txAmount = Number(tx.amount || 0);
+                          const isInflow =
+                            tx.category_type === 'INGRESO_FIJO' ||
+                            tx.category_type === 'INGRESO_VARIABLE';
+                          const isConfirming = confirmDeleteTxId === tx.id;
+                          const isDeleting = deletingTxId === tx.id;
+                          const accountLabel = tx.destination_account_name
+                            ? `${tx.account_name} → ${tx.destination_account_name}`
+                            : tx.account_name;
+
+                          return (
+                            <tr key={tx.id} className={styles.tr}>
+                              <td className={styles.tdDate}>{tx.date}</td>
+                              <td className={styles.tdMonth}>
+                                {tx.description || tx.sub_category_name}
+                              </td>
+                              <td className={styles.tdCategory}>
+                                <span className={styles.txCategoryMain}>{tx.category_name}</span>
+                                <span className={styles.txSubcategoryMuted}>
+                                  {' '}
+                                  · {tx.sub_category_name}
+                                </span>
+                              </td>
+                              <td className={styles.tdType}>
+                                <span
+                                  className={
+                                    isInflow
+                                      ? styles.txTypeBadgeEmerald
+                                      : tx.category_type === 'GASTO'
+                                        ? styles.txTypeBadgeRose
+                                        : styles.txTypeBadgeCyan
+                                  }
+                                >
+                                  {formatCategoryTypeLabel(tx.category_type)}
+                                </span>
+                              </td>
+                              <td className={styles.tdAccount}>{accountLabel}</td>
+                              <td
+                                className={
+                                  isInflow
+                                    ? styles.tdIncome
+                                    : tx.category_type === 'GASTO'
+                                      ? styles.tdExpense
+                                      : styles.tdAccumulated
+                                }
+                              >
+                                {isInflow ? '+' : '-'}
+                                {formatCurrencyCOP(txAmount)}
+                              </td>
+                              <td className={styles.tdAction}>
+                                {isConfirming ? (
+                                  <div className={styles.confirmActionGroup}>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => handleDeleteTransaction(tx.id)}
+                                      className={styles.confirmDeleteBtn}
+                                    >
+                                      {isDeleting ? 'Eliminando...' : 'Confirmar'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => setConfirmDeleteTxId(null)}
+                                      className={styles.cancelDeleteBtn}
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className={styles.actionBtnGroup}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingTransaction(tx);
+                                        setIsTxModalOpen(true);
+                                      }}
+                                      className={styles.editTxBtn}
+                                      title="Editar movimiento y ajustar saldo en cuenta"
+                                    >
+                                      <Pencil className={styles.deleteIcon} />
+                                      <span>Editar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteTxId(tx.id)}
+                                      className={styles.deleteTxBtn}
+                                      title="Eliminar movimiento y revertir saldo en cuenta"
+                                    >
+                                      <Trash2 className={styles.deleteIcon} />
+                                      <span>Eliminar</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className={styles.monthlyBanner}>
+                  <h3 className={styles.taxonomyTitle}>Registro Mensual de Flujo de Caja</h3>
+                  <p className={styles.taxonomySubtitle}>
+                    Haz clic en cualquier mes para ver el listado detallado de sus movimientos y
+                    administrarlos.
+                  </p>
+                </div>
+
+                <div className={styles.tableWrapper}>
+                  <table className={styles.table}>
+                    <thead className={styles.tableHead}>
+                      <tr>
+                        <th className={styles.th}>Mes</th>
+                        <th className={styles.thRight}>Ingresos</th>
+                        <th className={styles.thRight}>Gastos</th>
+                        <th className={styles.thRight}>Balance Mes</th>
+                        <th className={styles.thRight}>Tasa Ahorro</th>
+                        <th className={styles.thRight}>Balance Acumulado</th>
+                        <th className={styles.thRight}>Ahorro (Mes)</th>
+                      </tr>
+                    </thead>
+                    <tbody className={styles.tableBody}>
+                      {monthlyCashFlow.map((row) => (
+                        <tr
+                          key={row.rawMonth}
+                          onClick={() => {
+                            setSelectedFlowMonth(row.rawMonth);
+                            setConfirmDeleteTxId(null);
+                            setDeleteError(null);
+                          }}
+                          className={styles.trClickable}
+                        >
+                          <td className={styles.tdMonthClickable}>
+                            <span>{row.month}</span>
+                            <span className={styles.rowDrillHint}>Ver movimientos →</span>
+                          </td>
+                          <td className={styles.tdIncome}>{formatCurrencyCOP(row.ingresos)}</td>
+                          <td className={styles.tdExpense}>{formatCurrencyCOP(row.gastos)}</td>
+                          <td className={styles.tdBalance}>{formatCurrencyCOP(row.balanceMes)}</td>
+                          <td className={styles.tdRate}>
+                            {row.tasaAhorro > 0 ? `${row.tasaAhorro}%` : '0.0%'}
+                          </td>
+                          <td className={styles.tdAccumulated}>
+                            {formatCurrencyCOP(row.balanceAcumulado)}
+                          </td>
+                          <td className={styles.tdSavings}>{formatCurrencyCOP(row.ahorroMes)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </div>
         )}
       </main>

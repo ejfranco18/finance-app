@@ -1,4 +1,4 @@
-export type TransactionType = 'gasto' | 'ingreso' | 'ahorro_inversion';
+export type TransactionType = 'gasto' | 'ingreso' | 'ahorro_inversion' | 'transferencia';
 
 export type CurrencyCode = 'COP' | 'USD';
 
@@ -9,6 +9,7 @@ export type AccountType =
   | 'Billetera Digital'
   | 'Efectivo'
   | 'Ahorro'
+  | 'Tarjeta de crédito'
   | 'Broker'
   | 'Inversión';
 
@@ -31,6 +32,7 @@ export interface TransactionPayload {
   moneda: CurrencyCode;
   fecha: string;
   cuentaOrigenId: AccountSource;
+  cuentaDestinoId?: AccountSource;
   categoriaMacroId: string;
   subcategoria: string;
   descripcion: string;

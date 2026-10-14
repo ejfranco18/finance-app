@@ -185,6 +185,8 @@ export async function getDatabaseOverview(_req: Request, res: Response) {
 export async function getCanvasDashboard(req: Request, res: Response) {
   try {
     const userId = req.user?.uid || String(req.params.userId || req.query.userId || '');
+    const rawMonth = String(req.query.month || '').trim();
+    const filterMonth = /^\d{4}-\d{2}$/.test(rawMonth) ? rawMonth : null;
 
     if (!userId) {
       return res.status(400).json({ error: 'Usuario no identificado.' });
@@ -197,6 +199,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       monthlyCanvasRes,
       portfolioRes,
       taxonomyRes,
+      transactionsRes,
     ] = await Promise.all([
       query(
         `SELECT main_currency, exchange_rate_cop_usd, ai_provider
@@ -232,32 +235,89 @@ export async function getCanvasDashboard(req: Request, res: Response) {
         [userId]
       ),
       query(
+        `WITH subcat_base AS (
+           SELECT
+             c.category_name,
+             c.type AS category_type,
+             COALESCE(c.sub_category_name, 'General') AS sub_category_name
+           FROM categories c
+           WHERE c.user_id = $1 AND c.is_active = TRUE
+           UNION
+           SELECT
+             t.category_name,
+             t.category_type,
+             COALESCE(t.sub_category_name, 'General') AS sub_category_name
+           FROM transactions t
+           WHERE t.user_id = $1
+             AND ($2::text IS NULL OR TO_CHAR(t.date, 'YYYY-MM') = $2)
+         ),
+         tx_by_subcat AS (
+           SELECT
+             t.category_name,
+             t.category_type,
+             COALESCE(t.sub_category_name, 'General') AS sub_category_name,
+             SUM(t.amount) AS total_amount,
+             COUNT(*)::int AS transactions_count
+           FROM transactions t
+           WHERE t.user_id = $1
+             AND ($2::text IS NULL OR TO_CHAR(t.date, 'YYYY-MM') = $2)
+           GROUP BY t.category_name, t.category_type, COALESCE(t.sub_category_name, 'General')
+         ),
+         subcat_enriched AS (
+           SELECT
+             sb.category_name,
+             sb.category_type,
+             sb.sub_category_name,
+             COALESCE(tx.total_amount, 0) AS sub_amount,
+             COALESCE(tx.transactions_count, 0) AS transactions_count
+           FROM subcat_base sb
+           LEFT JOIN tx_by_subcat tx
+             ON sb.category_name = tx.category_name
+             AND sb.category_type = tx.category_type
+             AND sb.sub_category_name = tx.sub_category_name
+         )
+         SELECT
+           se.category_name,
+           se.category_type,
+           COUNT(*)::int AS subcategories_count,
+           COALESCE(SUM(se.sub_amount), 0) AS amount,
+           COALESCE(
+             JSON_AGG(
+               JSON_BUILD_OBJECT(
+                 'name', se.sub_category_name,
+                 'amount', se.sub_amount,
+                 'transactions_count', se.transactions_count
+               )
+               ORDER BY se.sub_amount DESC, se.sub_category_name ASC
+             ),
+             '[]'::json
+           ) AS subcategories
+         FROM subcat_enriched se
+         GROUP BY se.category_name, se.category_type
+         ORDER BY amount DESC, se.category_name ASC`,
+        [userId, filterMonth]
+      ),
+      query(
         `SELECT
-           cat.category_name,
-           cat.type AS category_type,
-           cat.subcategories_count,
-           COALESCE(tx.total_amount, 0) AS amount
-         FROM (
-           SELECT
-             category_name,
-             type,
-             COUNT(DISTINCT sub_category_name)::int AS subcategories_count
-           FROM categories
-           WHERE user_id = $1 AND is_active = TRUE
-           GROUP BY category_name, type
-         ) cat
-         LEFT JOIN (
-           SELECT
-             category_name,
-             category_type,
-             SUM(amount) AS total_amount
-           FROM transactions
-           WHERE user_id = $1
-           GROUP BY category_name, category_type
-         ) tx
-           ON cat.category_name = tx.category_name
-           AND cat.type = tx.category_type
-         ORDER BY amount DESC, cat.category_name ASC`,
+           t.id,
+           TO_CHAR(t.date, 'YYYY-MM-DD') AS date,
+           TO_CHAR(t.date, 'YYYY-MM') AS month,
+           COALESCE(t.description, '') AS description,
+           t.amount,
+           t.currency,
+           t.category_type,
+           t.category_name,
+           COALESCE(t.sub_category_name, 'General') AS sub_category_name,
+           t.account_id,
+           COALESCE(a.name, 'Cuenta') AS account_name,
+           t.destination_account_id,
+           da.name AS destination_account_name,
+           COALESCE(t.is_recurring, FALSE) AS is_recurring
+         FROM transactions t
+         LEFT JOIN accounts a ON t.account_id = a.id
+         LEFT JOIN accounts da ON t.destination_account_id = da.id
+         WHERE t.user_id = $1
+         ORDER BY t.date DESC, t.created_at DESC`,
         [userId]
       ),
     ]);
@@ -283,6 +343,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       monthlyCanvas: monthlyCanvasRes.rows,
       portfolio: portfolioRes.rows,
       taxonomy: taxonomyRes.rows,
+      transactions: transactionsRes.rows,
     });
   } catch (error) {
     console.error('Error al obtener datos del Canvas Dashboard:', error);
