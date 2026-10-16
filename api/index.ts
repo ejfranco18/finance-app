@@ -7,7 +7,11 @@ import {
   deleteTransaction,
 } from './controllers/transactionController';
 import { createLiabilityPayment } from './controllers/liabilityController';
-import { buyInvestment } from './controllers/investmentController';
+import {
+  buyInvestment,
+  updateInvestmentLot,
+  deleteInvestmentLot,
+} from './controllers/investmentController';
 import {
   getMonthlyCanvasView,
   getNetWorthView,
@@ -51,8 +55,10 @@ app.post('/api/patrimony', authenticateUser, createPatrimonyRecord);
 app.post('/api/settings', authenticateUser, updatePeriodSettings);
 app.put('/api/settings', authenticateUser, updatePeriodSettings);
 
-// 3. Inversiones (Compra de Acciones / ETFs)
+// 3. Inversiones (Lotes de Compra de Acciones / ETFs)
 app.post('/api/investments/buy', authenticateUser, buyInvestment);
+app.put('/api/investments/:holdingId', authenticateUser, updateInvestmentLot);
+app.delete('/api/investments/:holdingId', authenticateUser, deleteInvestmentLot);
 
 // 4. Endpoints de Lectura (Vistas Optimizadas de PostgreSQL)
 app.get('/api/canvas-dashboard', authenticateUser, getCanvasDashboard);
