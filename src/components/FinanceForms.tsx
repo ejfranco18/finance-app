@@ -23,6 +23,7 @@ import {
   ArrowRight,
   Code2,
   Wallet,
+  TrendingUp,
 } from 'lucide-react';
 import styles from './FinanceForms.module.css';
 
@@ -1942,3 +1943,401 @@ export const AccountFormModal: React.FC<AccountFormProps> = ({
     </div>
   );
 };
+
+/* =========================================================================
+   FORMULARIO 5: LOTE DE COMPRA DE ACCIONES / ETFs (PORTFOLIO HOLDINGS)
+   ========================================================================= */
+
+export interface EditableStockHolding {
+  id: string;
+  account_id: string;
+  ticker: string;
+  security_name: string;
+  shares: string;
+  average_buy_price: string;
+  purchase_date?: string;
+  currency: string;
+}
+
+interface StockHoldingFormProps {
+  isOpen: boolean;
+  onClose: () => void;
+  editingHolding?: EditableStockHolding | null;
+}
+
+export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
+  isOpen,
+  onClose,
+  editingHolding = null,
+}) => {
+  const queryClient = useQueryClient();
+  const isEditMode = Boolean(editingHolding?.id);
+
+  const [ticker, setTicker] = useState<string>('');
+  const [securityName, setSecurityName] = useState<string>('');
+  const [purchaseDate, setPurchaseDate] = useState<string>(
+    new Date().toISOString().split('T')[0]
+  );
+  const [investedAmount, setInvestedAmount] = useState<string>('');
+  const [shares, setShares] = useState<string>('');
+  const [buyPrice, setBuyPrice] = useState<string>('');
+  const [currency, setCurrency] = useState<CurrencyCode>('USD');
+
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setErrors({});
+
+    if (editingHolding) {
+      const sh = Number(editingHolding.shares || 0);
+      const bp = Number(editingHolding.average_buy_price || 0);
+      setTicker(editingHolding.ticker || '');
+      setSecurityName(editingHolding.security_name || '');
+      setPurchaseDate(
+        editingHolding.purchase_date
+          ? editingHolding.purchase_date.slice(0, 10)
+          : new Date().toISOString().split('T')[0]
+      );
+      setShares(String(sh));
+      setBuyPrice(String(bp));
+      setInvestedAmount(sh > 0 && bp > 0 ? (sh * bp).toFixed(2) : '');
+      setCurrency((editingHolding.currency as CurrencyCode) || 'USD');
+    } else {
+      setTicker('');
+      setSecurityName('');
+      setPurchaseDate(new Date().toISOString().split('T')[0]);
+      setInvestedAmount('');
+      setShares('');
+      setBuyPrice('');
+      setCurrency('USD');
+    }
+  }, [isOpen, editingHolding]);
+
+  if (!isOpen) return null;
+
+  const numShares = parseFloat(shares);
+  const numBuyPrice = parseFloat(buyPrice);
+  const calculatedTotal =
+    Number.isFinite(numShares) && numShares > 0 && Number.isFinite(numBuyPrice) && numBuyPrice > 0
+      ? numShares * numBuyPrice
+      : 0;
+
+  const handleInvestedAmountChange = (val: string) => {
+    setInvestedAmount(val);
+    const amt = parseFloat(val);
+    const bp = parseFloat(buyPrice);
+    if (Number.isFinite(amt) && amt > 0 && Number.isFinite(bp) && bp > 0) {
+      setShares((amt / bp).toFixed(8));
+      if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+    }
+  };
+
+  const handleBuyPriceChange = (val: string) => {
+    setBuyPrice(val);
+    if (errors.buyPrice) setErrors((prev) => ({ ...prev, buyPrice: '' }));
+    const bp = parseFloat(val);
+    const amt = parseFloat(investedAmount);
+    if (Number.isFinite(amt) && amt > 0 && Number.isFinite(bp) && bp > 0) {
+      setShares((amt / bp).toFixed(8));
+      if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+    }
+  };
+
+  const handleSharesChange = (val: string) => {
+    setShares(val);
+    if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+    const sh = parseFloat(val);
+    const bp = parseFloat(buyPrice);
+    if (Number.isFinite(sh) && sh > 0 && Number.isFinite(bp) && bp > 0) {
+      setInvestedAmount((sh * bp).toFixed(2));
+    }
+  };
+
+  const validate = (): boolean => {
+    const newErrors: Record<string, string> = {};
+    if (!ticker.trim()) {
+      newErrors.ticker = 'Ingresa el símbolo (ticker) de la acción o ETF (ej. AAPL, SPY, MU).';
+    }
+    if (!purchaseDate) {
+      newErrors.purchaseDate = 'La fecha de compra es obligatoria.';
+    }
+    if (!shares || isNaN(numShares) || numShares <= 0) {
+      newErrors.shares = 'Ingresa el monto invertido o la cantidad de acciones (> 0).';
+    }
+    if (!buyPrice || isNaN(numBuyPrice) || numBuyPrice <= 0) {
+      newErrors.buyPrice = 'Ingresa un precio de compra unitario mayor a 0.';
+    }
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
+
+    setIsLoading(true);
+    setErrors({});
+
+    try {
+      const headers = await buildAuthHeaders();
+      const endpoint =
+        isEditMode && editingHolding?.id
+          ? `/api/investments/${encodeURIComponent(editingHolding.id)}`
+          : '/api/investments/buy';
+      const method = isEditMode ? 'PUT' : 'POST';
+
+      const response = await fetch(endpoint, {
+        method,
+        headers,
+        body: JSON.stringify({
+          ticker: ticker.trim().toUpperCase(),
+          name: securityName.trim() || undefined,
+          purchaseDate,
+          shares: numShares,
+          buyPrice: numBuyPrice,
+          currency,
+          deductFromAccount: false,
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || 'No se pudo guardar el lote de acciones.');
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+      onClose();
+    } catch (err) {
+      setErrors({
+        submit: err instanceof Error ? err.message : 'Error al guardar lote en Neon DB.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className={styles.overlay}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="stock-form-title"
+        className={styles.modalCard}
+      >
+        <div className={styles.topGlowCyan} />
+
+        <div className={styles.modalHeader}>
+          <div className={styles.headerLeft}>
+            <div className={styles.iconBoxCyan}>
+              <TrendingUp className={styles.headerIcon} />
+            </div>
+            <div>
+              <h2 id="stock-form-title" className={styles.modalTitle}>
+                {isEditMode
+                  ? 'Editar Lote de Compra de Acción / ETF'
+                  : 'Registrar Compra de Acción / ETF'}
+              </h2>
+              <p className={styles.modalSubtitle}>
+                Ingresa el Monto Invertido y el Precio de la Acción (calcula las Shares automáticamente)
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Cerrar modal" className={styles.closeBtn}>
+            <X className={styles.closeIcon} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} noValidate className={styles.form}>
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="stock-ticker" className={styles.label}>
+                Ticker / Símbolo <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="stock-ticker"
+                type="text"
+                placeholder="ej. AAPL, SPY, MU, VOO"
+                value={ticker}
+                onChange={(e) => {
+                  setTicker(e.target.value.toUpperCase());
+                  if (errors.ticker) setErrors((prev) => ({ ...prev, ticker: '' }));
+                }}
+                aria-invalid={!!errors.ticker}
+                className={styles.inputMonoCyan}
+              />
+              {errors.ticker && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.ticker}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="stock-date" className={styles.label}>
+                Fecha de Compra <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="stock-date"
+                type="date"
+                value={purchaseDate}
+                onChange={(e) => {
+                  setPurchaseDate(e.target.value);
+                  if (errors.purchaseDate) setErrors((prev) => ({ ...prev, purchaseDate: '' }));
+                }}
+                className={styles.inputMonoCyan}
+              />
+              {errors.purchaseDate && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.purchaseDate}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="stock-invested-amount" className={styles.label}>
+                Monto Invertido ({currency}) <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="stock-invested-amount"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="ej. 500.00"
+                value={investedAmount}
+                onChange={(e) => handleInvestedAmountChange(e.target.value)}
+                className={styles.inputMonoCyan}
+              />
+            </div>
+
+            <div>
+              <label htmlFor="stock-buy-price" className={styles.label}>
+                Precio de la Acción en la Compra <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="stock-buy-price"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="ej. 328.07"
+                value={buyPrice}
+                onChange={(e) => handleBuyPriceChange(e.target.value)}
+                aria-invalid={!!errors.buyPrice}
+                className={styles.inputMonoCyan}
+              />
+              {errors.buyPrice && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.buyPrice}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="stock-shares" className={styles.label}>
+                Cantidad de Acciones (Shares calculadas) <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="stock-shares"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="Se calcula solo (Monto / Precio)"
+                value={shares}
+                onChange={(e) => handleSharesChange(e.target.value)}
+                aria-invalid={!!errors.shares}
+                className={styles.inputMonoCyan}
+              />
+              {errors.shares && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.shares}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="stock-currency" className={styles.label}>
+                Moneda de Cotización
+              </label>
+              <select
+                id="stock-currency"
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value as CurrencyCode)}
+                className={styles.inputMonoCyan}
+              >
+                <option value="USD">USD (US$)</option>
+                <option value="COP">COP ($)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="stock-name" className={styles.label}>
+              Nombre de la Empresa / ETF (Opcional · se autocompleta con Yahoo Finance)
+            </label>
+            <input
+              id="stock-name"
+              type="text"
+              placeholder="ej. Apple Inc., SPDR S&P 500 ETF Trust, Micron Technology"
+              value={securityName}
+              onChange={(e) => setSecurityName(e.target.value)}
+              className={styles.inputCyan}
+            />
+          </div>
+
+          {calculatedTotal > 0 && (
+            <div className={styles.conversionBanner}>
+              <span>
+                Resumen del Lote ({Number(shares).toFixed(6)} shares × {buyPrice}):
+              </span>
+              <span className={styles.conversionAmount}>
+                {currency === 'USD' ? 'US$' : '$'}
+                {calculatedTotal.toLocaleString('es-CO', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{' '}
+                {currency}
+              </span>
+            </div>
+          )}
+
+          {errors.submit && (
+            <p className={styles.errorText}>
+              <AlertCircle className={styles.errorIcon} /> {errors.submit}
+            </p>
+          )}
+
+          <div className={styles.footerActions}>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isLoading}
+              className={styles.cancelBtn}
+            >
+              Cancelar
+            </button>
+
+            <button type="submit" disabled={isLoading} className={styles.submitBtnCyan}>
+              {isLoading ? (
+                <>
+                  <Loader2 className={styles.spinnerIcon} />
+                  <span>{isEditMode ? 'Actualizando Lote...' : 'Guardando Lote...'}</span>
+                </>
+              ) : (
+                <>
+                  <span>{isEditMode ? 'Guardar Cambios' : 'Registrar Lote'}</span>
+                  <ArrowRight className={styles.arrowIcon} />
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
