@@ -14,10 +14,11 @@ Este skill automatiza la limpieza de la tabla `transactions` y la recarga de mov
    - Normaliza fechas a `YYYY-MM-DD`, montos a valores absolutos positivos (`ABS(amount)`), y tipos a su formato de base de datos (`INGRESO_FIJO`, `INGRESO_VARIABLE`, `GASTO`, `AHORRO`, `INVERSION`, `TRANSFERENCIA`).
 3. **Actualiza [`query.md`](file:///Users/francomorales/Documents/GitHub/finance-app/query.md)**:
    - Regenera la **Sección 7 (`MOVIMIENTOS HISTÓRICOS`)** con las sentencias `INSERT INTO transactions ...` correspondientes a cada fila de `transactions.md`.
-4. **Limpia y recarga Neon PostgreSQL en una transacción atómica (`BEGIN ... COMMIT`)**:
+4. **Limpia, recarga Neon PostgreSQL y recalcula saldos en una transacción atómica (`BEGIN ... COMMIT`)**:
+   - Crea automáticamente cualquier subcategoría nueva agregada a [`categories.md`](file:///Users/francomorales/Documents/GitHub/finance-app/categories.md) que aún no exista en la tabla `categories`.
    - Ejecuta `DELETE FROM transactions WHERE user_id = '3x2MF8k8fneASdMnlP0iJaast132'`.
-   - Inserta todos los registros de `transactions.md` vinculando sus respectivos `account_id` y `category_id`.
-   - **Importante**: No altera `accounts.current_balance`, ya que las cuentas ya tienen configurados sus saldos reales actuales.
+   - Inserta todos los registros de `transactions.md` vinculando sus respectivos `account_id`, `destination_account_id` (en transferencias como retiros de efectivo) y `category_id`.
+   - Recalcula `accounts.current_balance` para todas las cuentas activas sumando el historial de movimientos sobre su `initial_balance` calibrado.
 
 ## Cómo ejecutarlo
 

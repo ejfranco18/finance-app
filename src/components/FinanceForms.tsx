@@ -87,6 +87,7 @@ const CATEGORIES_BY_TYPE: Record<TransactionType, CategoryGroup[]> = {
         'Peajes',
         'Transporte público',
         'Revision carro',
+        'Arreglos auto',
         'Uber',
         'SOAT / Seguro / Impuestos',
         'Otros transporte',
@@ -107,7 +108,7 @@ const CATEGORIES_BY_TYPE: Record<TransactionType, CategoryGroup[]> = {
     {
       name: 'Suscripciones',
       dbType: 'GASTO',
-      subcategories: ['Streaming', 'Apple', 'Software / IA', 'Otras suscripciones'],
+      subcategories: ['Streaming', 'Spotify', 'Apple', 'Software / IA', 'Otras suscripciones'],
     },
     {
       name: 'Entretenimiento',
@@ -218,12 +219,23 @@ export interface EditableTransaction {
   is_recurring?: boolean;
 }
 
+export interface InitialTransactionDraft {
+  tipo?: TransactionType;
+  monto?: number | string;
+  moneda?: CurrencyCode;
+  cuentaOrigenId?: string;
+  categoriaMacroId?: string;
+  subcategoria?: string;
+  descripcion?: string;
+}
+
 interface TransactionFormProps {
   isOpen: boolean;
   onClose: () => void;
   accounts?: AccountOption[];
   trm?: number;
   editingTransaction?: EditableTransaction | null;
+  initialDraft?: InitialTransactionDraft | null;
   onSubmitSuccess?: (payload: TransactionPayload) => void;
 }
 
@@ -240,6 +252,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   accounts = [],
   trm = 3303.16,
   editingTransaction = null,
+  initialDraft = null,
   onSubmitSuccess,
 }) => {
   const queryClient = useQueryClient();
@@ -337,6 +350,26 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       setSubcategoria(editingTransaction.sub_category_name || 'Restaurante');
       setDescripcion(editingTransaction.description || '');
       setEsRecurrente(Boolean(editingTransaction.is_recurring));
+    } else if (initialDraft) {
+      const draftTipo = initialDraft.tipo || 'gasto';
+      setTipo(draftTipo);
+      setMonto(initialDraft.monto !== undefined ? String(initialDraft.monto) : '');
+      setMoneda(initialDraft.moneda || 'COP');
+      setFecha(new Date().toISOString().split('T')[0]);
+      if (initialDraft.cuentaOrigenId) {
+        setCuentaOrigenId(initialDraft.cuentaOrigenId);
+      } else if (accounts[0]?.id) {
+        setCuentaOrigenId(accounts[0].id);
+      }
+      const defaultCatGroup =
+        CATEGORIES_BY_TYPE[draftTipo]?.find((c) => c.name === initialDraft.categoriaMacroId) ||
+        CATEGORIES_BY_TYPE[draftTipo]?.[0];
+      setCategoriaMacroId(defaultCatGroup?.name || 'Alimentación');
+      setSubcategoria(
+        initialDraft.subcategoria || defaultCatGroup?.subcategories[0] || 'Restaurante'
+      );
+      setDescripcion(initialDraft.descripcion || '');
+      setEsRecurrente(false);
     } else {
       setTipo('gasto');
       setMonto('');
@@ -350,7 +383,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       setDescripcion('');
       setEsRecurrente(false);
     }
-  }, [isOpen, editingTransaction, accounts]);
+  }, [isOpen, editingTransaction, initialDraft, accounts]);
 
   if (!isOpen) return null;
 
