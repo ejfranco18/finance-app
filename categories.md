@@ -18,6 +18,7 @@ Transporte	|	Parqueadero
 Transporte	|	Peajes
 Transporte	|	Transporte público
 Transporte	|	Revision carro
+Transporte	|	Arreglos auto
 Transporte	|	Uber
 Transporte	|	SOAT / Seguro / Impuestos
 Transporte	|	Otros transporte
@@ -28,6 +29,7 @@ Viajes	|	Museos / Actividades
 Viajes	|	Transporte en viaje
 Viajes	|	Otros viaje
 Suscripciones	|	Streaming
+Suscripciones	|	Spotify
 Suscripciones	|	Apple
 Suscripciones	|	Software / IA
 Suscripciones	|	Otras suscripciones
