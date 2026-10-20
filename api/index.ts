@@ -21,6 +21,8 @@ import {
   getUserSettings,
   getUserAccounts,
   createAccount,
+  reconcileAccount,
+  runDailyInterestCron,
 } from './controllers/canvasController';
 
 const app = express();
@@ -32,11 +34,17 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Cron Job automático de interés compuesto diario (ejecutado después de medianoche por Vercel Cron)
+app.get('/api/cron/daily-interest', runDailyInterestCron);
+app.post('/api/cron/daily-interest', runDailyInterestCron);
+
 // Inspección de base de datos (DBTest.tsx)
 app.get('/api/db-overview', getDatabaseOverview);
 
-// 0. Creación de Cuentas (Bancos, Billeteras, Efectivo, Brokers)
+// 0. Creación y Conciliación de Cuentas (Bancos, Billeteras, Efectivo, Brokers)
 app.post('/api/accounts', authenticateUser, createAccount);
+app.put('/api/accounts/:accountId/reconcile', authenticateUser, reconcileAccount);
+app.post('/api/accounts/:accountId/reconcile', authenticateUser, reconcileAccount);
 
 // 1. Transacciones Generales
 app.post('/api/transactions', authenticateUser, createTransaction);

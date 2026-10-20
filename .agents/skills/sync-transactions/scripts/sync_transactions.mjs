@@ -12,6 +12,7 @@ const DEFAULT_USER_ID = '3x2MF8k8fneASdMnlP0iJaast132';
 const SUBCATEGORY_ALIASES = {
   'Hogar': 'Electrodomesticos',
   'Seguro auto': 'SOAT / Seguro / Impuestos',
+  'Transferencia entre cuentas': 'Traspaso entre Cuentas',
 };
 
 // Map account name in transactions.md to PL/pgSQL variable in query.md
@@ -27,9 +28,33 @@ const ACCOUNT_VAR_MAP = {
   'Broker Inversiones': 'v_acc_broker',
 };
 
+// Calibrated initial balances prior to line 1 of transactions.md (2026-09-09)
+// so that initial_balance + SUM(all transactions) equals the exact real account balances.
+const CALIBRATED_INITIAL_BALANCES = {
+  'Nu': 1416515.06,
+  'Nu Meridiano': 57067.71,
+  'Nequi': 40528.95,
+  'Efectivo': 135036.69,
+  'Nu ahorros': 22154300.59,
+  'Protti': 5000000.00,
+  'Littio': 14464.60,
+  'Dollarapp': 1252.24,
+  'Broker Inversiones': 0.00,
+};
+
+function inferCategoryTypeFromCatalog(categoryName) {
+  const lower = categoryName.toLowerCase();
+  if (lower === 'ingresos fijos') return 'INGRESO_FIJO';
+  if (lower === 'ingresos variables') return 'INGRESO_VARIABLE';
+  if (lower === 'ahorro') return 'AHORRO';
+  if (lower === 'inversión' || lower === 'inversion') return 'INVERSION';
+  if (lower === 'transferencia') return 'TRANSFERENCIA';
+  return 'GASTO';
+}
+
 function parseCategoriesCatalog(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
-  const map = new Map(); // sub_category_name -> { category_name, sub_category_name }
+  const map = new Map(); // sub_category_name.toLowerCase() -> { category_name, sub_category_name, type }
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#') || !line.includes('|')) continue;
@@ -39,6 +64,7 @@ function parseCategoriesCatalog(filePath) {
       map.set(subCategoryName.toLowerCase(), {
         category_name: categoryName,
         sub_category_name: subCategoryName,
+        type: inferCategoryTypeFromCatalog(categoryName),
       });
     }
   }
@@ -78,6 +104,17 @@ function escapeSqlLiteral(str) {
   return str.replace(/'/g, "''");
 }
 
+function resolveTransferDestinationAccount(categoryType, description, explicitDestAccount) {
+  if (categoryType !== 'TRANSFERENCIA') return null;
+  if (explicitDestAccount && explicitDestAccount.trim()) {
+    return explicitDestAccount.trim();
+  }
+  if (description.toLowerCase().includes('efectivo')) {
+    return 'Efectivo';
+  }
+  return null;
+}
+
 function parseTransactionsFile(filePath, catalogMap) {
   const content = fs.readFileSync(filePath, 'utf8');
   const lines = content.split(/\r?\n/);
@@ -91,7 +128,7 @@ function parseTransactionsFile(filePath, catalogMap) {
       throw new Error(`Línea ${idx + 1} en transactions.md no tiene 7 columnas separadas por '|': ${rawLine}`);
     }
 
-    const [rawDate, description, rawAmount, rawType, rawSubCategory, accountName, currency] = parts;
+    const [rawDate, description, rawAmount, rawType, rawSubCategory, accountName, currency, explicitDestAccount] = parts;
     const date = normalizeDate(rawDate);
     const amount = normalizeAmount(rawAmount);
     const category_type = normalizeType(rawType);
@@ -104,6 +141,12 @@ function parseTransactionsFile(filePath, catalogMap) {
       );
     }
 
+    const destination_account_name = resolveTransferDestinationAccount(
+      category_type,
+      description,
+      explicitDestAccount
+    );
+
     parsed.push({
       lineNumber: idx + 1,
       date,
@@ -113,6 +156,7 @@ function parseTransactionsFile(filePath, catalogMap) {
       category_name: catalogEntry.category_name,
       sub_category_name: catalogEntry.sub_category_name,
       account_name: accountName,
+      destination_account_name,
       currency: currency.toUpperCase(),
     });
   });
@@ -131,6 +175,17 @@ function updateQueryMdFile(queryFilePath, transactions) {
     const subEscaped = escapeSqlLiteral(tx.sub_category_name);
     const catEscaped = escapeSqlLiteral(tx.category_name);
     const descEscaped = escapeSqlLiteral(tx.description);
+
+    if (tx.destination_account_name) {
+      const destVar = ACCOUNT_VAR_MAP[tx.destination_account_name];
+      if (!destVar) {
+        throw new Error(
+          `Cuenta destino "${tx.destination_account_name}" no tiene variable PL/pgSQL mapeada en ACCOUNT_VAR_MAP`
+        );
+      }
+      return `    INSERT INTO transactions (user_id, account_id, destination_account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, ${destVar}, (SELECT id FROM categories WHERE user_id = v_user_id AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
+    }
+
     return `    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, (SELECT id FROM categories WHERE user_id = v_user_id AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
   });
 
@@ -147,7 +202,7 @@ function updateQueryMdFile(queryFilePath, transactions) {
   fs.writeFileSync(queryFilePath, updated, 'utf8');
 }
 
-async function syncDatabase(transactions, userId) {
+async function syncDatabase(transactions, catalogMap, userId) {
   if (!process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL no está definida en las variables de entorno (.env)');
   }
@@ -172,6 +227,25 @@ async function syncDatabase(transactions, userId) {
       catRes.rows.map((r) => [`${r.type}|${r.sub_category_name.toLowerCase()}`, r])
     );
 
+    // Ensure all subcategories in categories.md exist in Neon DB
+    let createdCategories = 0;
+    for (const entry of catalogMap.values()) {
+      const key = `${entry.type}|${entry.sub_category_name.toLowerCase()}`;
+      if (!categoryByKey.has(key)) {
+        const insCat = await client.query(
+          `INSERT INTO categories (user_id, type, category_name, sub_category_name)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, type, category_name, sub_category_name`,
+          [userId, entry.type, entry.category_name, entry.sub_category_name]
+        );
+        categoryByKey.set(key, insCat.rows[0]);
+        createdCategories += 1;
+      }
+    }
+    if (createdCategories > 0) {
+      console.log(`🏷️ Creadas ${createdCategories} nuevas subcategorías en Neon DB desde categories.md`);
+    }
+
     const deleteRes = await client.query('DELETE FROM transactions WHERE user_id = $1', [userId]);
     console.log(`🧹 Eliminados ${deleteRes.rowCount} movimientos previos en Neon DB para user_id=${userId}`);
 
@@ -183,18 +257,29 @@ async function syncDatabase(transactions, userId) {
         );
       }
 
+      let destinationAccountId = null;
+      if (tx.destination_account_name) {
+        destinationAccountId = accountByName.get(tx.destination_account_name.toLowerCase());
+        if (!destinationAccountId) {
+          throw new Error(
+            `Línea ${tx.lineNumber}: No se encontró la cuenta destino "${tx.destination_account_name}" en la tabla accounts de Neon DB`
+          );
+        }
+      }
+
       const catKey = `${tx.category_type}|${tx.sub_category_name.toLowerCase()}`;
       const catRow = categoryByKey.get(catKey);
       const categoryId = catRow ? catRow.id : null;
 
       await client.query(
         `INSERT INTO transactions (
-          user_id, account_id, category_id, date, amount, currency,
+          user_id, account_id, destination_account_id, category_id, date, amount, currency,
           category_type, category_name, sub_category_name, description
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           userId,
           accountId,
+          destinationAccountId,
           categoryId,
           tx.date,
           tx.amount.toFixed(2),
@@ -207,8 +292,70 @@ async function syncDatabase(transactions, userId) {
       );
     }
 
+    // Ensure reconciliation and compound interest columns exist
+    await client.query(
+      `ALTER TABLE accounts
+       ADD COLUMN IF NOT EXISTS reconciled_balance NUMERIC(15, 2) DEFAULT NULL,
+       ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+       ADD COLUMN IF NOT EXISTS annual_interest_rate NUMERIC(6, 4) NOT NULL DEFAULT 0,
+       ADD COLUMN IF NOT EXISTS accumulated_interest NUMERIC(15, 2) NOT NULL DEFAULT 0,
+       ADD COLUMN IF NOT EXISTS last_interest_date DATE DEFAULT NULL`
+    );
+
+    await client.query(
+      `UPDATE accounts
+       SET
+         annual_interest_rate = 9.3500,
+         last_interest_date = COALESCE(last_interest_date, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date)
+       WHERE user_id = $1
+         AND LOWER(name) IN ('nu', 'nu meridiano', 'nu ahorros')
+         AND annual_interest_rate = 0`,
+      [userId]
+    );
+
+    // Calibrate initial_balance for known accounts and recalculate current_balance from transactions + accumulated_interest
+    for (const [accName, initBal] of Object.entries(CALIBRATED_INITIAL_BALANCES)) {
+      const accId = accountByName.get(accName.toLowerCase());
+      if (accId) {
+        await client.query(
+          'UPDATE accounts SET initial_balance = $1 WHERE id = $2 AND user_id = $3',
+          [initBal, accId, userId]
+        );
+      }
+    }
+
+    const updatedBalancesRes = await client.query(
+      `UPDATE accounts a
+       SET
+         current_balance = a.initial_balance + COALESCE(a.accumulated_interest, 0) + COALESCE((
+           SELECT SUM(
+             CASE
+               WHEN t.account_id = a.id AND t.category_type IN ('INGRESO_FIJO', 'INGRESO_VARIABLE')
+                 THEN t.amount
+               WHEN t.account_id = a.id AND t.category_type IN ('GASTO', 'AHORRO', 'INVERSION', 'DEUDA', 'TRANSFERENCIA')
+                 THEN -t.amount
+               WHEN t.destination_account_id = a.id AND t.category_type = 'TRANSFERENCIA'
+                 THEN t.amount
+               ELSE 0
+             END
+           )
+           FROM transactions t
+           WHERE t.user_id = $1
+             AND (t.account_id = a.id OR t.destination_account_id = a.id)
+         ), 0),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE a.user_id = $1 AND a.is_active = true
+       RETURNING name, currency, initial_balance, current_balance, annual_interest_rate, accumulated_interest`,
+      [userId]
+    );
+
     await client.query('COMMIT');
     console.log(`✅ Insertados ${transactions.length} movimientos en Neon DB desde transactions.md`);
+    console.log('💰 Saldos recalculados en Neon DB:');
+    for (const row of updatedBalancesRes.rows) {
+      const rateTag = Number(row.annual_interest_rate) > 0 ? ` [${Number(row.annual_interest_rate)}% E.A.]` : '';
+      console.log(`   - ${row.name} (${row.currency}): ${Number(row.current_balance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${rateTag}`);
+    }
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -226,7 +373,7 @@ async function main() {
   updateQueryMdFile(QUERY_FILE, transactions);
   console.log(`📝 Actualizado query.md (Sección 7) con ${transactions.length} sentencias INSERT`);
 
-  await syncDatabase(transactions, DEFAULT_USER_ID);
+  await syncDatabase(transactions, catalogMap, DEFAULT_USER_ID);
 }
 
 main().catch((err) => {
