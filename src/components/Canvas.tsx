@@ -8,6 +8,7 @@ import {
   AccountFormModal,
   InitialTransactionDraft,
 } from './FinanceForms';
+import { AIAssistantModal } from './AIAssistantModal';
 import {
   Wallet,
   ArrowUpRight,
@@ -24,6 +25,7 @@ import {
   TrendingUp,
   AlertTriangle,
   CheckCircle2,
+  Sparkles,
   X,
 } from 'lucide-react';
 import styles from './Canvas.module.css';
@@ -192,9 +194,8 @@ const MONTH_NAMES: Record<string, string> = {
 };
 
 function formatNumberCOP(value: number): string {
-  const hasDecimals = Math.abs(value % 1) > 0.001;
   return new Intl.NumberFormat('es-CO', {
-    minimumFractionDigits: hasDecimals ? 2 : 0,
+    minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
 }
@@ -270,6 +271,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
   const [isPeriodModalOpen, setIsPeriodModalOpen] = useState(false);
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
 
@@ -664,6 +666,16 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           if (Number.isFinite(payload.tasaAhorroMetaPorcentaje)) {
             setSavingsGoalPct(payload.tasaAhorroMetaPorcentaje);
           }
+        }}
+      />
+      <AIAssistantModal
+        isOpen={isAiModalOpen}
+        onClose={() => setIsAiModalOpen(false)}
+        onOpenTransactionDraft={(draft) => {
+          setIsAiModalOpen(false);
+          setEditingTransaction(null);
+          setTxInitialDraft(draft);
+          setIsTxModalOpen(true);
         }}
       />
 
@@ -1184,6 +1196,20 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           <button onClick={() => setIsAssetModalOpen(true)} className={styles.secondaryCyanBtn}>
             <Building className={styles.btnIcon} />
             <span>+ Activo / Deuda</span>
+          </button>
+
+          <button
+            onClick={() => setIsAiModalOpen(true)}
+            className={styles.secondaryCyanBtn}
+            style={{
+              backgroundColor: 'rgba(168, 85, 247, 0.14)',
+              borderColor: 'rgba(192, 132, 252, 0.45)',
+              color: '#e9d5ff',
+            }}
+            title="Abrir Copiloto Financiero IA (Contexto Neon DB + Configuración de API Key por usuario)"
+          >
+            <Sparkles className={styles.btnIcon} style={{ color: '#c084fc' }} />
+            <span>Copiloto IA</span>
           </button>
 
           <button onClick={() => setIsPeriodModalOpen(true)} className={styles.periodBtn}>

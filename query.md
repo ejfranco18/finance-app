@@ -1,6 +1,14 @@
 -- Habilitar UUID por si no está activo
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Columnas de conciliación bancaria e interés compuesto diario en cuentas
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS reconciled_balance NUMERIC(15, 2) DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS annual_interest_rate NUMERIC(6, 4) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS accumulated_interest NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_interest_date DATE DEFAULT NULL;
+
 DO $$
 DECLARE
     -- Reemplaza este valor por tu UID real de Firebase Auth
@@ -30,7 +38,7 @@ BEGIN
     ON CONFLICT (user_id) DO UPDATE SET exchange_rate_cop_usd = EXCLUDED.exchange_rate_cop_usd;
 
     -- =========================================================================
-    -- 2. CATÁLOGO COMPLETO DE CATEGORÍAS Y SUBCATEGORÍAS (68 subcategorías)
+    -- 2. CATÁLOGO COMPLETO DE CATEGORÍAS Y SUBCATEGORÍAS (70 subcategorías)
     -- =========================================================================
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Alimentación', 'Restaurante');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Alimentación', 'Domicilios');
@@ -49,6 +57,7 @@ BEGIN
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Peajes');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Transporte público');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Revision carro');
+    INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Arreglos auto');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Uber');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'SOAT / Seguro / Impuestos');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Transporte', 'Otros transporte');
@@ -59,6 +68,7 @@ BEGIN
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Viajes', 'Transporte en viaje');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Viajes', 'Otros viaje');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Suscripciones', 'Streaming');
+    INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Suscripciones', 'Spotify');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Suscripciones', 'Apple');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Suscripciones', 'Software / IA');
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'GASTO', 'Suscripciones', 'Otras suscripciones');
@@ -102,13 +112,13 @@ BEGIN
     INSERT INTO categories (id, user_id, type, category_name, sub_category_name) VALUES (uuid_generate_v4(), v_user_id, 'INVERSION', 'Inversión', 'Inversión inmobiliaria');
 
     -- =========================================================================
-    -- 3. CUENTAS (Con tus saldos exactos)
+    -- 3. CUENTAS (initial_balance calibrado + current_balance calculado al día + 9.35% E.A. en cuentas Nu)
     -- =========================================================================
-    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Nu', 'Banco', 'COP', 4701054.61, 4701054.61) RETURNING id INTO v_acc_nu;
-    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Nu Meridiano', 'Banco', 'COP', 1475537.07, 1475537.07) RETURNING id INTO v_acc_nu_meridiano;
-    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Nequi', 'Billetera digital', 'COP', 528.95, 528.95) RETURNING id INTO v_acc_nequi;
-    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Efectivo', 'Efectivo', 'COP', 360000.00, 360000.00) RETURNING id INTO v_acc_efectivo;
-    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Nu ahorros', 'Ahorro', 'COP', 22154300.59, 22154300.59) RETURNING id INTO v_acc_nu_ahorros;
+    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance, annual_interest_rate, last_interest_date) VALUES (uuid_generate_v4(), v_user_id, 'Nu', 'Banco', 'COP', 1416515.06, 3873173.61, 9.3500, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date) RETURNING id INTO v_acc_nu;
+    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance, annual_interest_rate, last_interest_date) VALUES (uuid_generate_v4(), v_user_id, 'Nu Meridiano', 'Banco', 'COP', 60432.08, 1478901.44, 9.3500, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date) RETURNING id INTO v_acc_nu_meridiano;
+    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Nequi', 'Billetera digital', 'COP', 40528.95, 528.95) RETURNING id INTO v_acc_nequi;
+    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Efectivo', 'Efectivo', 'COP', 135036.69, 285000.00) RETURNING id INTO v_acc_efectivo;
+    INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance, annual_interest_rate, last_interest_date) VALUES (uuid_generate_v4(), v_user_id, 'Nu ahorros', 'Ahorro', 'COP', 22204814.43, 22204814.43, 9.3500, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date) RETURNING id INTO v_acc_nu_ahorros;
     INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Protti', 'Inversión', 'COP', 5000000.00, 5000000.00) RETURNING id INTO v_acc_protti;
     INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Littio', 'Ahorro', 'USD', 14464.60, 14464.60) RETURNING id INTO v_acc_littio;
     INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Dollarapp', 'Cuenta en dólares', 'USD', 1252.24, 1252.24) RETURNING id INTO v_acc_dollarapp;
@@ -117,14 +127,17 @@ BEGIN
     INSERT INTO accounts (id, user_id, name, type, currency, initial_balance, current_balance) VALUES (uuid_generate_v4(), v_user_id, 'Broker Inversiones', 'Broker', 'USD', 0.00, 0.00) RETURNING id INTO v_acc_broker;
 
     -- =========================================================================
-    -- 4. ACCIONES (SECURITIES) Y PORTAFOLIO DE INVERSIÓN
+    -- 4. ACCIONES (SECURITIES) Y PORTAFOLIO DE INVERSIÓN (LOTES INDEPENDIENTES)
     -- =========================================================================
-    INSERT INTO securities (ticker, name, asset_class, currency, current_price) VALUES ('AAPL', 'Apple Inc.', 'Equity', 'USD', 225.50) ON CONFLICT (ticker) DO UPDATE SET current_price = EXCLUDED.current_price;
-    INSERT INTO securities (ticker, name, asset_class, currency, current_price) VALUES ('VOO', 'Vanguard S&P 500 ETF', 'ETF', 'USD', 512.80) ON CONFLICT (ticker) DO UPDATE SET current_price = EXCLUDED.current_price;
+    INSERT INTO securities (ticker, name, asset_class, currency, current_price) VALUES ('AAPL', 'Apple Inc.', 'Equity', 'USD', 341.27) ON CONFLICT (ticker) DO UPDATE SET current_price = EXCLUDED.current_price;
+    INSERT INTO securities (ticker, name, asset_class, currency, current_price) VALUES ('SPY', 'SPDR S&P 500 ETF Trust', 'ETF', 'USD', 778.01) ON CONFLICT (ticker) DO UPDATE SET current_price = EXCLUDED.current_price;
+    INSERT INTO securities (ticker, name, asset_class, currency, current_price) VALUES ('MU', 'Micron Technology, Inc.', 'Equity', 'USD', 953.19) ON CONFLICT (ticker) DO UPDATE SET current_price = EXCLUDED.current_price;
 
-    -- Mapeo de saldo en USD a cantidad de acciones exactas (Shares = Saldo USD / Precio Promedio)
-    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, currency) VALUES (v_user_id, v_acc_broker, 'AAPL', 3.519467, 225.5000, 'USD') ON CONFLICT DO NOTHING;
-    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, currency) VALUES (v_user_id, v_acc_broker, 'VOO', 1.019364, 512.8000, 'USD') ON CONFLICT DO NOTHING;
+    -- Lotes independientes de compra (Shares = Monto Invertido USD / Precio de Compra)
+    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency) VALUES (v_user_id, v_acc_broker, 'AAPL', 1.52406499, 328.0700, '2026-07-22', 'USD');
+    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency) VALUES (v_user_id, v_acc_broker, 'AAPL', 0.86706717, 339.5700, '2026-07-28', 'USD');
+    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency) VALUES (v_user_id, v_acc_broker, 'SPY', 0.67464547, 741.1300, '2026-07-28', 'USD');
+    INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency) VALUES (v_user_id, v_acc_broker, 'MU', 0.11564321, 1091.7200, '2026-09-25', 'USD');
 
     -- =========================================================================
     -- 5. ACTIVOS FIJOS REALES
@@ -141,7 +154,7 @@ BEGIN
     INSERT INTO liabilities (id, user_id, name, type, original_amount, current_balance, interest_rate, currency) VALUES (uuid_generate_v4(), v_user_id, 'Meridiano', 'Crédito hipotecario', 107000000.00, 107000000.00, 0, 'COP');
 
     -- =========================================================================
-    -- 7. MOVIMIENTOS HISTÓRICOS (63 registros desde transactions.md)
+    -- 7. MOVIMIENTOS HISTÓRICOS (78 registros desde transactions.md)
     -- =========================================================================
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu_meridiano, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'INGRESO_FIJO' AND sub_category_name = 'Arriendo' LIMIT 1), '2026-09-09', 1397440.00, 'COP', 'INGRESO_FIJO', 'Ingresos Fijos', 'Arriendo', 'Arriendo');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Comida gatos' LIMIT 1), '2026-09-13', 135600.00, 'COP', 'GASTO', 'Mascotas', 'Comida gatos', 'Concentrado');
@@ -159,7 +172,7 @@ BEGIN
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'AHORRO' AND sub_category_name = 'Ahorro COP' LIMIT 1), '2026-09-21', 2000000.00, 'COP', 'AHORRO', 'Ahorro', 'Ahorro COP', 'Ahorro COP');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Parqueadero' LIMIT 1), '2026-09-21', 5000.00, 'COP', 'GASTO', 'Transporte', 'Parqueadero', 'Parqueadero');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'INGRESO_VARIABLE' AND sub_category_name = 'Otros ingresos variables' LIMIT 1), '2026-09-18', 567000.00, 'COP', 'INGRESO_VARIABLE', 'Ingresos Variables', 'Otros ingresos variables', 'Regalo');
-    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Streaming' LIMIT 1), '2026-09-18', 30500.00, 'COP', 'GASTO', 'Suscripciones', 'Streaming', 'Spotify');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Spotify' LIMIT 1), '2026-09-18', 30500.00, 'COP', 'GASTO', 'Suscripciones', 'Spotify', 'Spotify');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Parqueadero' LIMIT 1), '2026-09-18', 2650.00, 'COP', 'GASTO', 'Transporte', 'Parqueadero', 'Parqueadero');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Mercado' LIMIT 1), '2026-09-19', 26500.00, 'COP', 'GASTO', 'Mercado', 'Mercado', 'Mercado');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Uber' LIMIT 1), '2026-09-19', 12998.00, 'COP', 'GASTO', 'Transporte', 'Uber', 'Uber');
@@ -206,6 +219,21 @@ BEGIN
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Domicilios' LIMIT 1), '2026-10-06', 34000.00, 'COP', 'GASTO', 'Alimentación', 'Domicilios', 'Almuerzo');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Mercado' LIMIT 1), '2026-10-05', 36390.00, 'COP', 'GASTO', 'Mercado', 'Mercado', 'Mercado');
     INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu_meridiano, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'INGRESO_FIJO' AND sub_category_name = 'Arriendo' LIMIT 1), '2026-10-10', 1397440.00, 'COP', 'INGRESO_FIJO', 'Ingresos Fijos', 'Arriendo', 'Arriendo');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Cine' LIMIT 1), '2026-10-10', 45000.00, 'COP', 'GASTO', 'Entretenimiento', 'Cine', 'Cine');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Restaurante' LIMIT 1), '2026-10-10', 55000.00, 'COP', 'GASTO', 'Alimentación', 'Restaurante', 'Almuerzo');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Mercado' LIMIT 1), '2026-10-11', 5000.00, 'COP', 'GASTO', 'Mercado', 'Mercado', 'Mercado');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Mercado' LIMIT 1), '2026-10-12', 5000.00, 'COP', 'GASTO', 'Mercado', 'Mercado', 'Mercado');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Arreglos auto' LIMIT 1), '2026-10-13', 120000.00, 'COP', 'GASTO', 'Transporte', 'Arreglos auto', 'Despinchada');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Medicamentos' LIMIT 1), '2026-10-13', 49760.00, 'COP', 'GASTO', 'Salud', 'Medicamentos', 'Medicina');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Medicamentos' LIMIT 1), '2026-10-16', 20000.00, 'COP', 'GASTO', 'Salud', 'Medicamentos', 'Medicina');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Servicios públicos' LIMIT 1), '2026-10-16', 200000.00, 'COP', 'GASTO', 'Vivienda', 'Servicios públicos', 'Servicios');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Donaciones' LIMIT 1), '2026-10-17', 5000.00, 'COP', 'GASTO', 'Donaciones', 'Donaciones', 'Donación');
+    INSERT INTO transactions (user_id, account_id, destination_account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, v_acc_efectivo, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'TRANSFERENCIA' AND sub_category_name = 'Traspaso entre Cuentas' LIMIT 1), '2026-10-17', 280000.00, 'COP', 'TRANSFERENCIA', 'Transferencia', 'Traspaso entre Cuentas', 'Retiro efectivo');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Domicilios' LIMIT 1), '2026-10-15', 25000.00, 'COP', 'GASTO', 'Alimentación', 'Domicilios', 'domicilio');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Restaurante' LIMIT 1), '2026-10-17', 88172.00, 'COP', 'GASTO', 'Alimentación', 'Restaurante', 'almuerzo');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Otras suscripciones' LIMIT 1), '2026-10-18', 211849.00, 'COP', 'GASTO', 'Suscripciones', 'Otras suscripciones', 'subscripcion cookido');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Spotify' LIMIT 1), '2026-10-18', 30500.00, 'COP', 'GASTO', 'Suscripciones', 'Spotify', 'spotify');
+    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, v_acc_nu, (SELECT id FROM categories WHERE user_id = v_user_id AND type = 'GASTO' AND sub_category_name = 'Mercado' LIMIT 1), '2026-10-19', 42600.00, 'COP', 'GASTO', 'Mercado', 'Mercado', 'Mercado');
 
     -- =========================================================================
     -- 8. CATEGORÍAS DE TRANSFERENCIA / PAGO DE TARJETA DE CRÉDITO

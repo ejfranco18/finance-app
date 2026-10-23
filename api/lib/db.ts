@@ -13,8 +13,14 @@ if (!rawDatabaseUrl) {
   console.error('⚠️ DATABASE_URL no está definido en las variables de entorno.');
 }
 
+// Garantiza validación estricta del certificado TLS y del hostname de Neon (sslmode=verify-full),
+// evitando el warning de deprecación de pg-connection-string en local y en producción (Vercel).
+const normalizedDatabaseUrl = rawDatabaseUrl
+  ? rawDatabaseUrl.replace(/([?&])sslmode=(?:require|prefer|verify-ca)\b/i, '$1sslmode=verify-full')
+  : undefined;
+
 export const pool = new Pool({
-  connectionString: rawDatabaseUrl,
+  connectionString: normalizedDatabaseUrl,
   ssl: {
     rejectUnauthorized: true,
   },

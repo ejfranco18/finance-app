@@ -176,47 +176,100 @@ export async function buyInvestment(req: Request, res: Response) {
 }
 
 /**
- * Estrategia Caché On-Demand para precios de mercado (> 30 minutos).
- * Revisa `securities.last_price_update` de los títulos del usuario y refresca los que tengan
- * más de 30 minutos de antigüedad consultando Yahoo Finance.
+ * Consulta un símbolo en Yahoo Finance (`v8/finance/chart`) y devuelve `regularMarketPrice`.
+ */
+async function fetchYahooFinancePrice(symbol: string): Promise<number | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+
+    if (!res.ok) return null;
+
+    const data: unknown = await res.json();
+    const marketPrice = Number(
+      (data as { chart?: { result?: Array<{ meta?: { regularMarketPrice?: number } }> } })
+        ?.chart?.result?.[0]?.meta?.regularMarketPrice
+    );
+
+    return Number.isFinite(marketPrice) && marketPrice > 0 ? marketPrice : null;
+  } catch (fetchErr) {
+    console.warn(`No se pudo refrescar cotización en Yahoo Finance para ${symbol}:`, fetchErr);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Estrategia Caché On-Demand (> 30 minutos) consultando Yahoo Finance:
+ * 1. Revisa `user_settings.updated_at` del usuario y actualiza `exchange_rate_cop_usd` usando el ticker `USDCOP=X`.
+ * 2. Revisa `securities.last_price_update` de los títulos del usuario y refresca los que tengan > 30 min.
  */
 export async function refreshStaleSecurityPrices(userId: string): Promise<void> {
   try {
-    const staleResult = await query<{ ticker: string }>(
-      `SELECT DISTINCT s.ticker
-       FROM portfolio_holdings h
-       JOIN securities s ON h.ticker = s.ticker
-       WHERE h.user_id = $1
-         AND (
-           s.last_price_update IS NULL
-           OR s.last_price_update < (CURRENT_TIMESTAMP - INTERVAL '30 minutes')
-         )`,
-      [userId]
-    );
+    const [staleSecuritiesRes, trmStaleRes] = await Promise.all([
+      query<{ ticker: string }>(
+        `SELECT DISTINCT s.ticker
+         FROM portfolio_holdings h
+         JOIN securities s ON h.ticker = s.ticker
+         WHERE h.user_id = $1
+           AND (
+             s.last_price_update IS NULL
+             OR s.last_price_update < (CURRENT_TIMESTAMP - INTERVAL '30 minutes')
+           )`,
+        [userId]
+      ),
+      query<{ should_refresh: boolean }>(
+        `SELECT
+           CASE
+             WHEN NOT EXISTS (SELECT 1 FROM user_settings WHERE user_id = $1) THEN TRUE
+             ELSE COALESCE((
+               SELECT
+                 updated_at IS NULL
+                 OR updated_at < (CURRENT_TIMESTAMP - INTERVAL '30 minutes')
+                 OR ROUND(exchange_rate_cop_usd::numeric, 2) = 3266.78
+               FROM user_settings
+               WHERE user_id = $1
+               LIMIT 1
+             ), TRUE)
+           END AS should_refresh`,
+        [userId]
+      ),
+    ]);
 
-    if (staleResult.rowCount === 0) {
-      return;
+    const tasks: Promise<unknown>[] = [];
+
+    // 1. Refrescar TRM USD/COP desde Yahoo Finance (USDCOP=X) si tiene > 30 minutos
+    const shouldRefreshTrm = trmStaleRes.rows[0]?.should_refresh === true;
+    if (shouldRefreshTrm) {
+      tasks.push(
+        (async () => {
+          const usdCopPrice = await fetchYahooFinancePrice('USDCOP=X');
+          if (usdCopPrice !== null && usdCopPrice > 1000 && usdCopPrice < 10000) {
+            await query(
+              `INSERT INTO user_settings (user_id, main_currency, exchange_rate_cop_usd, ai_provider, updated_at)
+               VALUES ($1, 'COP', $2, 'gemini', CURRENT_TIMESTAMP)
+               ON CONFLICT (user_id) DO UPDATE SET
+                 exchange_rate_cop_usd = EXCLUDED.exchange_rate_cop_usd,
+                 updated_at = CURRENT_TIMESTAMP`,
+              [userId, Number(usdCopPrice.toFixed(4))]
+            );
+          }
+        })()
+      );
     }
 
-    await Promise.allSettled(
-      staleResult.rows.map(async ({ ticker }) => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 4000);
-        try {
-          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
-          const res = await fetch(url, {
-            signal: controller.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-          });
-
-          if (!res.ok) return;
-
-          const data: any = await res.json();
-          const marketPrice = Number(
-            data?.chart?.result?.[0]?.meta?.regularMarketPrice
-          );
-
-          if (Number.isFinite(marketPrice) && marketPrice > 0) {
+    // 2. Refrescar precios de acciones/ETFs desde Yahoo Finance si tienen > 30 minutos
+    for (const { ticker } of staleSecuritiesRes.rows) {
+      tasks.push(
+        (async () => {
+          const marketPrice = await fetchYahooFinancePrice(ticker);
+          if (marketPrice !== null) {
             await query(
               `UPDATE securities
                SET current_price = $1,
@@ -225,14 +278,15 @@ export async function refreshStaleSecurityPrices(userId: string): Promise<void> 
               [marketPrice, ticker]
             );
           }
-        } catch (fetchErr) {
-          console.warn(`No se pudo refrescar el precio de mercado para ${ticker}:`, fetchErr);
-        } finally {
-          clearTimeout(timeout);
-        }
-      })
-    );
+        })()
+      );
+    }
+
+    if (tasks.length > 0) {
+      await Promise.allSettled(tasks);
+    }
   } catch (error) {
-    console.warn('Error al verificar caché de precios de títulos:', error);
+    console.warn('Error al verificar caché de precios y TRM en Yahoo Finance:', error);
   }
 }
+

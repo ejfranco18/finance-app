@@ -32,10 +32,10 @@ const ACCOUNT_VAR_MAP = {
 // so that initial_balance + SUM(all transactions) equals the exact real account balances.
 const CALIBRATED_INITIAL_BALANCES = {
   'Nu': 1416515.06,
-  'Nu Meridiano': 57067.71,
+  'Nu Meridiano': 60432.08,
   'Nequi': 40528.95,
   'Efectivo': 135036.69,
-  'Nu ahorros': 22154300.59,
+  'Nu ahorros': 22204814.43,
   'Protti': 5000000.00,
   'Littio': 14464.60,
   'Dollarapp': 1252.24,
@@ -313,12 +313,20 @@ async function syncDatabase(transactions, catalogMap, userId) {
       [userId]
     );
 
-    // Calibrate initial_balance for known accounts and recalculate current_balance from transactions + accumulated_interest
+    // Calibrate initial_balance for known accounts and recalculate current_balance from transactions
     for (const [accName, initBal] of Object.entries(CALIBRATED_INITIAL_BALANCES)) {
       const accId = accountByName.get(accName.toLowerCase());
       if (accId) {
         await client.query(
-          'UPDATE accounts SET initial_balance = $1 WHERE id = $2 AND user_id = $3',
+          `UPDATE accounts
+           SET
+             initial_balance = $1,
+             accumulated_interest = 0,
+             last_interest_date = CASE
+               WHEN annual_interest_rate > 0 THEN (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date
+               ELSE last_interest_date
+             END
+           WHERE id = $2 AND user_id = $3`,
           [initBal, accId, userId]
         );
       }
