@@ -24,6 +24,17 @@ import {
   reconcileAccount,
   runDailyInterestCron,
 } from './controllers/canvasController';
+import {
+  getAiSettings,
+  updateAiSettings,
+  chatWithFinancialAi,
+} from './controllers/aiController';
+import {
+  updateTelegramBotSettings,
+  handleTelegramWebhook,
+  syncTelegramUpdates,
+  startLocalTelegramPoller,
+} from './controllers/telegramController';
 
 const app = express();
 app.use(cors());
@@ -62,7 +73,17 @@ app.put('/api/settings', authenticateUser, updatePeriodSettings);
 // 3. Inversiones (Compra de Acciones / ETFs)
 app.post('/api/investments/buy', authenticateUser, buyInvestment);
 
-// 4. Endpoints de Lectura (Vistas Optimizadas de PostgreSQL)
+// 4. Copiloto Financiero IA Agnóstico (BYOK por usuario + Contexto Neon DB + Telegram Bot 24/7)
+app.get('/api/ai/settings', authenticateUser, getAiSettings);
+app.put('/api/ai/settings', authenticateUser, updateAiSettings);
+app.post('/api/ai/settings', authenticateUser, updateAiSettings);
+app.post('/api/ai/chat', authenticateUser, chatWithFinancialAi);
+app.put('/api/ai/telegram/settings', authenticateUser, updateTelegramBotSettings);
+app.post('/api/ai/telegram/settings', authenticateUser, updateTelegramBotSettings);
+app.post('/api/ai/telegram/sync', authenticateUser, syncTelegramUpdates);
+app.post('/api/ai/telegram-webhook/:userId', handleTelegramWebhook);
+
+// 5. Endpoints de Lectura (Vistas Optimizadas de PostgreSQL)
 app.get('/api/canvas-dashboard', authenticateUser, getCanvasDashboard);
 app.get('/api/canvas/:month', authenticateUser, getMonthlyCanvasView);
 app.get('/api/net-worth', authenticateUser, getNetWorthView);
@@ -76,8 +97,9 @@ app.get('/api/users/:userId/accounts', authenticateUser, getUserAccounts);
 
 if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
   const PORT = 4000;
-  app.listen(PORT, () => {
-    console.log(`🚀 API Express escuchando en http://localhost:${PORT}`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`🚀 API Express escuchando en http://127.0.0.1:${PORT}`);
+    startLocalTelegramPoller();
   });
 }
 
