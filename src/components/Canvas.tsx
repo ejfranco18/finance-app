@@ -1056,7 +1056,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                             (tx.category_type === 'INGRESO_FIJO' ||
                               tx.category_type === 'INGRESO_VARIABLE')) ||
                           (tx.destination_account_id === reconcilingAccount.id &&
-                            tx.category_type === 'TRANSFERENCIA');
+                            (tx.category_type === 'TRANSFERENCIA' ||
+                              tx.category_type === 'AHORRO' ||
+                              tx.category_type === 'INVERSION'));
                         const isConfirming = confirmDeleteTxId === tx.id;
                         const isDeleting = deletingTxId === tx.id;
                         const fmtTx =

@@ -49,17 +49,16 @@ export async function createTransaction(req: Request, res: Response) {
       });
     }
 
-    if (categoryType === 'TRANSFERENCIA') {
-      if (!destinationAccountId) {
-        return res.status(400).json({
-          error: 'destinationAccountId es obligatorio cuando categoryType es TRANSFERENCIA.',
-        });
-      }
-      if (String(destinationAccountId) === String(accountId)) {
-        return res.status(400).json({
-          error: 'La cuenta de origen y la cuenta de destino deben ser diferentes.',
-        });
-      }
+    if (categoryType === 'TRANSFERENCIA' && !destinationAccountId) {
+      return res.status(400).json({
+        error: 'destinationAccountId es obligatorio cuando categoryType es TRANSFERENCIA.',
+      });
+    }
+
+    if (destinationAccountId && String(destinationAccountId) === String(accountId)) {
+      return res.status(400).json({
+        error: 'La cuenta de origen y la cuenta de destino deben ser diferentes.',
+      });
     }
 
     // 2. Iniciar transacción SQL (BEGIN ... COMMIT)
@@ -174,7 +173,12 @@ export async function createTransaction(req: Request, res: Response) {
       }
 
       let destinationAccount = null;
-      if (categoryType === 'TRANSFERENCIA' && resolvedDestinationAccountId) {
+      const supportsDestinationAccount =
+        categoryType === 'TRANSFERENCIA' ||
+        categoryType === 'AHORRO' ||
+        categoryType === 'INVERSION';
+
+      if (supportsDestinationAccount && resolvedDestinationAccountId) {
         const updateDest = await client.query<{ id: string; current_balance: string; currency: string }>(
           `UPDATE accounts
            SET current_balance = current_balance + $1,
@@ -255,7 +259,12 @@ export async function deleteTransaction(req: Request, res: Response) {
         [revertDelta, tx.account_id, userId]
       );
 
-      if (tx.category_type === 'TRANSFERENCIA' && tx.destination_account_id) {
+      if (
+        tx.destination_account_id &&
+        (tx.category_type === 'TRANSFERENCIA' ||
+          tx.category_type === 'AHORRO' ||
+          tx.category_type === 'INVERSION')
+      ) {
         await client.query(
           `UPDATE accounts
            SET current_balance = current_balance - $1,
@@ -318,17 +327,16 @@ export async function updateTransaction(req: Request, res: Response) {
       });
     }
 
-    if (categoryType === 'TRANSFERENCIA') {
-      if (!destinationAccountId) {
-        return res.status(400).json({
-          error: 'destinationAccountId es obligatorio cuando categoryType es TRANSFERENCIA.',
-        });
-      }
-      if (String(destinationAccountId) === String(accountId)) {
-        return res.status(400).json({
-          error: 'La cuenta de origen y la cuenta de destino deben ser diferentes.',
-        });
-      }
+    if (categoryType === 'TRANSFERENCIA' && !destinationAccountId) {
+      return res.status(400).json({
+        error: 'destinationAccountId es obligatorio cuando categoryType es TRANSFERENCIA.',
+      });
+    }
+
+    if (destinationAccountId && String(destinationAccountId) === String(accountId)) {
+      return res.status(400).json({
+        error: 'La cuenta de origen y la cuenta de destino deben ser diferentes.',
+      });
     }
 
     const updated = await withTransaction(async (client) => {
@@ -356,7 +364,7 @@ export async function updateTransaction(req: Request, res: Response) {
         oldTx.category_type === 'INGRESO_FIJO' || oldTx.category_type === 'INGRESO_VARIABLE';
       const revertDelta = wasInflow ? -oldAmount : oldAmount;
 
-      // 2. Revertir el efecto de la transacción anterior en la cuenta origen (y destino si era transferencia)
+      // 2. Revertir el efecto de la transacción anterior en la cuenta origen (y destino si aplica)
       await client.query(
         `UPDATE accounts
          SET current_balance = current_balance + $1,
@@ -365,7 +373,12 @@ export async function updateTransaction(req: Request, res: Response) {
         [revertDelta, oldTx.account_id, userId]
       );
 
-      if (oldTx.category_type === 'TRANSFERENCIA' && oldTx.destination_account_id) {
+      if (
+        oldTx.destination_account_id &&
+        (oldTx.category_type === 'TRANSFERENCIA' ||
+          oldTx.category_type === 'AHORRO' ||
+          oldTx.category_type === 'INVERSION')
+      ) {
         await client.query(
           `UPDATE accounts
            SET current_balance = current_balance - $1,
@@ -391,8 +404,13 @@ export async function updateTransaction(req: Request, res: Response) {
         }
       }
 
+      const supportsDestinationAccount =
+        categoryType === 'TRANSFERENCIA' ||
+        categoryType === 'AHORRO' ||
+        categoryType === 'INVERSION';
+
       let resolvedDestinationAccountId: string | null =
-        categoryType === 'TRANSFERENCIA' && destinationAccountId
+        supportsDestinationAccount && destinationAccountId
           ? String(destinationAccountId)
           : null;
       if (resolvedDestinationAccountId) {
@@ -455,7 +473,7 @@ export async function updateTransaction(req: Request, res: Response) {
         ]
       );
 
-      // 5. Aplicar el nuevo impacto en la cuenta origen (y destino si es transferencia)
+      // 5. Aplicar el nuevo impacto en la cuenta origen (y destino si aplica)
       const isInflow = categoryType === 'INGRESO_FIJO' || categoryType === 'INGRESO_VARIABLE';
       const newOriginDelta = isInflow ? amount : -amount;
 
@@ -477,7 +495,7 @@ export async function updateTransaction(req: Request, res: Response) {
       }
 
       let destinationAccount = null;
-      if (categoryType === 'TRANSFERENCIA' && resolvedDestinationAccountId) {
+      if (supportsDestinationAccount && resolvedDestinationAccountId) {
         const updateDest = await client.query<{
           id: string;
           current_balance: string;
