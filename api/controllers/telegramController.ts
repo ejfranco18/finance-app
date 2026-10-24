@@ -749,9 +749,26 @@ export async function updateTelegramBotSettings(req: Request, res: Response) {
       });
       const whData = (await whRes.json()) as { ok?: boolean };
       webhookRegistered = Boolean(whData.ok);
+      usersWithActiveCloudWebhook.add(userId);
     } else {
-      // En localhost desactivamos webhook previo para permitir sincronización por getUpdates sin conflicto
-      await fetch(`https://api.telegram.org/bot${rawBotToken}/deleteWebhook`).catch(() => {});
+      // En localhost verificamos primero si ya hay un Webhook HTTPS activo en producción (Vercel).
+      // Solo lo borramos si no había Webhook HTTPS o si el usuario pidió explícitamente forceLocalPolling.
+      const infoRes = await fetch(`https://api.telegram.org/bot${rawBotToken}/getWebhookInfo`).catch(
+        () => null
+      );
+      const infoData = infoRes
+        ? ((await infoRes.json().catch(() => null)) as { result?: { url?: string } } | null)
+        : null;
+      const existingWebhookUrl = String(infoData?.result?.url || '').trim();
+
+      if (existingWebhookUrl.startsWith('https://') && req.body?.forceLocalPolling !== true) {
+        webhookRegistered = true;
+        webhookUrl = existingWebhookUrl;
+        usersWithActiveCloudWebhook.add(userId);
+      } else {
+        await fetch(`https://api.telegram.org/bot${rawBotToken}/deleteWebhook`).catch(() => {});
+        usersWithActiveCloudWebhook.delete(userId);
+      }
     }
 
     return res.status(200).json({
@@ -760,7 +777,7 @@ export async function updateTelegramBotSettings(req: Request, res: Response) {
       webhookUrl,
       isLocalhost,
       message: webhookRegistered
-        ? `Bot @${botUsername} conectado con Webhook HTTPS 24/7.`
+        ? `Bot @${botUsername} conectado con Webhook HTTPS 24/7 (${webhookUrl}).`
         : `Bot @${botUsername} conectado en modo local. Envía /start en Telegram para vincular tu chat.`,
       telegram: {
         hasBotToken: true,
@@ -775,6 +792,101 @@ export async function updateTelegramBotSettings(req: Request, res: Response) {
     return res.status(500).json({
       error: 'Error interno al configurar el Bot de Telegram.',
     });
+  }
+}
+
+const verifiedProductionWebhooksByUser = new Map<string, string>();
+const usersWithActiveCloudWebhook = new Set<string>();
+
+/**
+ * Si la petición entra desde un dominio HTTPS público (ej. Vercel), verifica y registra
+ * automáticamente el Webhook 24/7 de Telegram hacia ese dominio sin requerir que el usuario
+ * vuelva a pegar el Token del Bot manualmente.
+ */
+export async function ensureProductionTelegramWebhook(
+  userId: string,
+  req: Request
+): Promise<string | null> {
+  try {
+    if (!userId) return null;
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').trim();
+    const protoHeader = String(req.headers['x-forwarded-proto'] || 'http').trim();
+    const isLocalhost =
+      hostHeader.startsWith('localhost') ||
+      hostHeader.startsWith('127.0.0.1') ||
+      hostHeader === '';
+
+    if (isLocalhost || protoHeader !== 'https') {
+      return null;
+    }
+
+    const expectedWebhookUrl = `https://${hostHeader}/api/ai/telegram-webhook/${encodeURIComponent(
+      userId
+    )}`;
+
+    if (verifiedProductionWebhooksByUser.get(userId) === expectedWebhookUrl) {
+      return expectedWebhookUrl;
+    }
+
+    await ensureAiSettingsColumns();
+
+    const userRes = await query<{
+      telegram_bot_token_encrypted: string | null;
+      telegram_webhook_secret: string | null;
+    }>(
+      `SELECT telegram_bot_token_encrypted, telegram_webhook_secret
+       FROM user_settings
+       WHERE user_id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    const row = userRes.rows[0];
+    const botToken = decryptApiKey(row?.telegram_bot_token_encrypted);
+    if (!botToken) return null;
+
+    let webhookSecret = row?.telegram_webhook_secret?.trim() || '';
+    if (!webhookSecret) {
+      webhookSecret = crypto.randomBytes(24).toString('hex');
+      await query(
+        `UPDATE user_settings
+         SET telegram_webhook_secret = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $2`,
+        [webhookSecret, userId]
+      );
+    }
+
+    const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+    const infoData = (await infoRes.json()) as {
+      ok?: boolean;
+      result?: { url?: string };
+    };
+
+    const currentUrl = String(infoData?.result?.url || '').trim();
+    if (currentUrl !== expectedWebhookUrl) {
+      const whRes = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: expectedWebhookUrl,
+          secret_token: webhookSecret,
+          allowed_updates: ['message', 'callback_query'],
+        }),
+      });
+      const whData = (await whRes.json()) as { ok?: boolean };
+      if (whData.ok) {
+        console.log(
+          `☁️ [TelegramBot] Webhook 24/7 auto-registrado en producción: ${expectedWebhookUrl}`
+        );
+      }
+    }
+
+    verifiedProductionWebhooksByUser.set(userId, expectedWebhookUrl);
+    usersWithActiveCloudWebhook.add(userId);
+    return expectedWebhookUrl;
+  } catch (err) {
+    console.error('Error auto-verificando Webhook de Telegram en producción:', err);
+    return null;
   }
 }
 
@@ -846,6 +958,7 @@ export async function syncTelegramUpdatesForUserId(userId: string): Promise<{
   isLinked: boolean;
   chatId: string | null;
   skippedConcurrent?: boolean;
+  webhookActive?: boolean;
 }> {
   if (activeSyncLocksByUser.has(userId)) {
     return {
@@ -889,11 +1002,34 @@ export async function syncTelegramUpdatesForUserId(userId: string): Promise<{
     );
     const updatesData = (await updatesRes.json()) as {
       ok?: boolean;
+      error_code?: number;
       result?: TelegramUpdate[];
       description?: string;
     };
 
     if (!updatesRes.ok || !updatesData.ok) {
+      // Si devuelve 409 Conflict significa que el Webhook HTTPS 24/7 en Vercel ya está activo
+      if (
+        updatesRes.status === 409 ||
+        updatesData.error_code === 409 ||
+        String(updatesData.description || '').toLowerCase().includes('webhook')
+      ) {
+        if (!usersWithActiveCloudWebhook.has(userId)) {
+          usersWithActiveCloudWebhook.add(userId);
+          console.log(
+            `☁️ [TelegramBot] Webhook 24/7 activo en la nube (Vercel) para user=${userId}. El listener local cede el paso a Vercel.`
+          );
+        }
+        return {
+          processedCount: 0,
+          isLinked: Boolean(userRow.telegram_chat_id),
+          chatId: userRow.telegram_chat_id
+            ? `***${String(userRow.telegram_chat_id).slice(-4)}`
+            : null,
+          webhookActive: true,
+        };
+      }
+
       throw new Error(
         updatesData.description || 'No se pudieron consultar los mensajes de Telegram.'
       );
@@ -929,7 +1065,7 @@ export async function syncTelegramUpdatesForUserId(userId: string): Promise<{
 
 /**
  * POST /api/ai/telegram/sync
- * Sincroniza y procesa mensajes pendientes del Bot de Telegram mediante `getUpdates`.
+ * Sincroniza y procesa mensajes pendientes del Bot de Telegram mediante `getUpdates` (o asegura Webhook en Vercel).
  */
 export async function syncTelegramUpdates(req: Request, res: Response) {
   const userId = req.user?.uid;
@@ -938,6 +1074,23 @@ export async function syncTelegramUpdates(req: Request, res: Response) {
   }
 
   try {
+    const cloudWebhookUrl = await ensureProductionTelegramWebhook(userId, req);
+    if (cloudWebhookUrl) {
+      const refreshedRes = await query<{ telegram_chat_id: string | null }>(
+        `SELECT telegram_chat_id FROM user_settings WHERE user_id = $1 LIMIT 1`,
+        [userId]
+      );
+      const linkedChatId = refreshedRes.rows[0]?.telegram_chat_id || null;
+      return res.status(200).json({
+        success: true,
+        processedCount: 0,
+        isLinked: Boolean(linkedChatId),
+        chatId: linkedChatId ? `***${String(linkedChatId).slice(-4)}` : null,
+        webhookActive: true,
+        webhookUrl: cloudWebhookUrl,
+      });
+    }
+
     const result = await syncTelegramUpdatesForUserId(userId);
     return res.status(200).json({
       success: true,
@@ -954,8 +1107,7 @@ let localPollerStarted = false;
 
 /**
  * En desarrollo local (`npm run dev`), ejecuta un listener en segundo plano dentro del servidor Express
- * cada 3 segundos para que los mensajes, notas de voz y botones (`🗑️ Deshacer`) de Telegram funcionen
- * al instante incluso cuando el modal del navegador está cerrado.
+ * cada 3 segundos únicamente para usuarios que NO tengan un Webhook HTTPS 24/7 activo en Vercel.
  */
 export function startLocalTelegramPoller(): void {
   if (localPollerStarted) return;
@@ -975,6 +1127,7 @@ export function startLocalTelegramPoller(): void {
          WHERE telegram_bot_token_encrypted IS NOT NULL`
       );
       for (const row of activeUsers.rows) {
+        if (usersWithActiveCloudWebhook.has(row.user_id)) continue;
         await syncTelegramUpdatesForUserId(row.user_id).catch(() => {});
       }
     } catch {
