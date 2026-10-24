@@ -30,7 +30,7 @@ export async function updateAccountBalance(userId: string, accountId: string): P
                THEN t.amount
              WHEN t.account_id = a.id AND t.category_type IN ('GASTO', 'AHORRO', 'INVERSION', 'DEUDA', 'TRANSFERENCIA')
                THEN -t.amount
-             WHEN t.destination_account_id = a.id AND t.category_type = 'TRANSFERENCIA'
+             WHEN t.destination_account_id = a.id AND t.category_type IN ('TRANSFERENCIA', 'AHORRO', 'INVERSION')
                THEN t.amount
              ELSE 0
            END

@@ -182,6 +182,7 @@ export async function getAiSettings(req: Request, res: Response) {
       telegram_bot_token_encrypted: string | null;
       telegram_bot_username: string | null;
       telegram_chat_id: string | null;
+      telegram_webhook_secret: string | null;
     }>(
       `SELECT
          ai_provider,
@@ -189,7 +190,8 @@ export async function getAiSettings(req: Request, res: Response) {
          ai_api_key_encrypted,
          telegram_bot_token_encrypted,
          telegram_bot_username,
-         telegram_chat_id
+         telegram_chat_id,
+         telegram_webhook_secret
        FROM user_settings
        WHERE user_id = $1
        LIMIT 1`,
@@ -210,6 +212,47 @@ export async function getAiSettings(req: Request, res: Response) {
         : rawSavedModel || providerConfig.defaultModel;
     const decryptedKey = decryptApiKey(row?.ai_api_key_encrypted);
     const decryptedTelegramToken = decryptApiKey(row?.telegram_bot_token_encrypted);
+
+    // Si estamos en un dominio HTTPS público (Vercel) y ya hay un Bot configurado, asegurar el Webhook 24/7
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').trim();
+    const protoHeader = String(req.headers['x-forwarded-proto'] || 'http').trim();
+    const isLocalhost =
+      hostHeader.startsWith('localhost') ||
+      hostHeader.startsWith('127.0.0.1') ||
+      hostHeader === '';
+
+    if (decryptedTelegramToken && !isLocalhost && protoHeader === 'https') {
+      const expectedWebhookUrl = `https://${hostHeader}/api/ai/telegram-webhook/${encodeURIComponent(
+        userId
+      )}`;
+      let webhookSecret = row?.telegram_webhook_secret?.trim() || '';
+      if (!webhookSecret) {
+        webhookSecret = crypto.randomBytes(24).toString('hex');
+        await query(
+          `UPDATE user_settings
+           SET telegram_webhook_secret = $1, updated_at = CURRENT_TIMESTAMP
+           WHERE user_id = $2`,
+          [webhookSecret, userId]
+        );
+      }
+      void fetch(`https://api.telegram.org/bot${decryptedTelegramToken}/getWebhookInfo`)
+        .then((r) => r.json() as Promise<{ result?: { url?: string } }>)
+        .then((info) => {
+          if (String(info?.result?.url || '').trim() !== expectedWebhookUrl) {
+            return fetch(`https://api.telegram.org/bot${decryptedTelegramToken}/setWebhook`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                url: expectedWebhookUrl,
+                secret_token: webhookSecret,
+                allowed_updates: ['message', 'callback_query'],
+              }),
+            });
+          }
+          return null;
+        })
+        .catch(() => {});
+    }
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
@@ -340,134 +383,138 @@ export async function buildUserFinancialContext(userId: string): Promise<{
   systemInstruction: string;
   accounts: Array<{ id: string; name: string; type: string; currency: string }>;
 }> {
-  const [
-    settingsRes,
-    accountsRes,
-    netWorthRes,
-    monthlyCanvasRes,
-    portfolioRes,
-    assetsRes,
-    liabilitiesRes,
-    categorySummaryRes,
-    recentTransactionsRes,
-    categoriesCatalogRes,
-  ] = await Promise.all([
-    query(
-      `SELECT main_currency, exchange_rate_cop_usd
-       FROM user_settings
-       WHERE user_id = $1
-       LIMIT 1`,
-      [userId]
-    ),
-    query(
-      `SELECT
-         id, name, type, currency,
-         initial_balance, current_balance, reconciled_balance,
-         annual_interest_rate, accumulated_interest,
-         TO_CHAR(last_interest_date, 'YYYY-MM-DD') AS last_interest_date
-       FROM accounts
-       WHERE user_id = $1 AND is_active = TRUE
-       ORDER BY created_at ASC`,
-      [userId]
-    ),
-    query(
-      `SELECT liquid_assets, fixed_assets, total_assets, total_liabilities, net_worth
-       FROM v_net_worth
-       WHERE user_id = $1
-       LIMIT 1`,
-      [userId]
-    ),
-    query(
-      `SELECT
-         month,
-         fixed_income,
-         variable_income,
-         total_income,
-         total_expenses,
-         (total_income - total_expenses) AS net_cash_flow,
-         total_savings,
-         total_investments,
-         total_debt_payments
-       FROM v_monthly_canvas
-       WHERE user_id = $1
-       ORDER BY month DESC`,
-      [userId]
-    ),
-    query(
-      `SELECT
-         account_name,
-         ticker,
-         security_name,
-         shares,
-         average_buy_price,
-         current_price,
-         total_cost_basis,
-         current_market_value,
-         unrealized_pnl,
-         pnl_percentage,
-         currency
-       FROM v_portfolio_summary
-       WHERE user_id = $1
-       ORDER BY ticker ASC`,
-      [userId]
-    ),
-    query(
-      `SELECT name, type, estimated_value, currency
-       FROM assets
-       WHERE user_id = $1
-       ORDER BY created_at ASC`,
-      [userId]
-    ),
-    query(
-      `SELECT name, type, original_amount, current_balance, interest_rate, currency
-       FROM liabilities
-       WHERE user_id = $1
-       ORDER BY created_at ASC`,
-      [userId]
-    ),
-    query(
-      `SELECT
-         TO_CHAR(date, 'YYYY-MM') AS month,
-         category_type,
-         category_name,
-         sub_category_name,
-         ROUND(SUM(amount)::numeric, 2) AS total_amount,
-         COUNT(*)::int AS tx_count
-       FROM transactions
-       WHERE user_id = $1
-       GROUP BY 1, 2, 3, 4
-       ORDER BY 1 DESC, total_amount DESC`,
-      [userId]
-    ),
-    query(
-      `SELECT
-         TO_CHAR(t.date, 'YYYY-MM-DD') AS date,
-         t.description,
-         t.amount,
-         t.currency,
-         t.category_type,
-         t.category_name,
-         t.sub_category_name,
-         a.name AS account_name,
-         da.name AS destination_account_name
-       FROM transactions t
-       LEFT JOIN accounts a ON a.id = t.account_id
-       LEFT JOIN accounts da ON da.id = t.destination_account_id
-       WHERE t.user_id = $1
-       ORDER BY t.date DESC, t.created_at DESC
-       LIMIT 120`,
-      [userId]
-    ),
-    query(
-      `SELECT type, category_name, sub_category_name
-       FROM categories
-       WHERE user_id = $1 AND is_active = TRUE
-       ORDER BY type, category_name, sub_category_name`,
-      [userId]
-    ),
-  ]);
+  const consolidatedRes = await query<{
+    settings: { main_currency?: string; exchange_rate_cop_usd?: string | number } | null;
+    accounts: Array<{
+      id: string;
+      name: string;
+      type: string;
+      currency: string;
+      initial_balance: string | number;
+      current_balance: string | number;
+      reconciled_balance: string | number | null;
+      annual_interest_rate: string | number;
+      accumulated_interest: string | number;
+      last_interest_date: string | null;
+    }>;
+    net_worth: Record<string, unknown> | null;
+    monthly_canvas: Array<Record<string, unknown>>;
+    portfolio: Array<Record<string, unknown>>;
+    assets: Array<Record<string, unknown>>;
+    liabilities: Array<Record<string, unknown>>;
+    category_summary: Array<Record<string, unknown>>;
+    recent_transactions: Array<Record<string, unknown>>;
+    categories_catalog: Array<Record<string, unknown>>;
+  }>(
+    `SELECT
+       (SELECT row_to_json(s) FROM (
+          SELECT main_currency, exchange_rate_cop_usd
+          FROM user_settings
+          WHERE user_id = $1
+          LIMIT 1
+        ) s) AS settings,
+       COALESCE((SELECT json_agg(row_to_json(a)) FROM (
+          SELECT
+            id, name, type, currency,
+            initial_balance, current_balance, reconciled_balance,
+            annual_interest_rate, accumulated_interest,
+            TO_CHAR(last_interest_date, 'YYYY-MM-DD') AS last_interest_date
+          FROM accounts
+          WHERE user_id = $1 AND is_active = TRUE
+          ORDER BY created_at ASC
+        ) a), '[]'::json) AS accounts,
+       (SELECT row_to_json(nw) FROM (
+          SELECT liquid_assets, fixed_assets, total_assets, total_liabilities, net_worth
+          FROM v_net_worth
+          WHERE user_id = $1
+          LIMIT 1
+        ) nw) AS net_worth,
+       COALESCE((SELECT json_agg(row_to_json(mc)) FROM (
+          SELECT
+            month,
+            fixed_income,
+            variable_income,
+            total_income,
+            total_expenses,
+            (total_income - total_expenses) AS net_cash_flow,
+            total_savings,
+            total_investments,
+            total_debt_payments
+          FROM v_monthly_canvas
+          WHERE user_id = $1
+          ORDER BY month DESC
+        ) mc), '[]'::json) AS monthly_canvas,
+       COALESCE((SELECT json_agg(row_to_json(ps)) FROM (
+          SELECT
+            account_name,
+            ticker,
+            security_name,
+            shares,
+            average_buy_price,
+            current_price,
+            total_cost_basis,
+            current_market_value,
+            unrealized_pnl,
+            pnl_percentage,
+            currency
+          FROM v_portfolio_summary
+          WHERE user_id = $1
+          ORDER BY ticker ASC
+        ) ps), '[]'::json) AS portfolio,
+       COALESCE((SELECT json_agg(row_to_json(ast)) FROM (
+          SELECT name, type, estimated_value, currency
+          FROM assets
+          WHERE user_id = $1
+          ORDER BY created_at ASC
+        ) ast), '[]'::json) AS assets,
+       COALESCE((SELECT json_agg(row_to_json(lb)) FROM (
+          SELECT name, type, original_amount, current_balance, interest_rate, currency
+          FROM liabilities
+          WHERE user_id = $1
+          ORDER BY created_at ASC
+        ) lb), '[]'::json) AS liabilities,
+       COALESCE((SELECT json_agg(row_to_json(cs)) FROM (
+          SELECT
+            TO_CHAR(date, 'YYYY-MM') AS month,
+            category_type,
+            category_name,
+            sub_category_name,
+            ROUND(SUM(amount)::numeric, 2) AS total_amount,
+            COUNT(*)::int AS tx_count
+          FROM transactions
+          WHERE user_id = $1
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1 DESC, total_amount DESC
+        ) cs), '[]'::json) AS category_summary,
+       COALESCE((SELECT json_agg(row_to_json(rt)) FROM (
+          SELECT
+            TO_CHAR(t.date, 'YYYY-MM-DD') AS date,
+            t.description,
+            t.amount,
+            t.currency,
+            t.category_type,
+            t.category_name,
+            t.sub_category_name,
+            a.name AS account_name,
+            da.name AS destination_account_name
+          FROM transactions t
+          LEFT JOIN accounts a ON a.id = t.account_id
+          LEFT JOIN accounts da ON da.id = t.destination_account_id
+          WHERE t.user_id = $1
+          ORDER BY t.date DESC, t.created_at DESC
+          LIMIT 120
+        ) rt), '[]'::json) AS recent_transactions,
+       COALESCE((SELECT json_agg(row_to_json(cat)) FROM (
+          SELECT type, category_name, sub_category_name
+          FROM categories
+          WHERE user_id = $1 AND is_active = TRUE
+          ORDER BY type, category_name, sub_category_name
+        ) cat), '[]'::json) AS categories_catalog`,
+    [userId]
+  );
 
-  const trm = Number(settingsRes.rows[0]?.exchange_rate_cop_usd || 3266.78);
+  const ctx = consolidatedRes.rows[0];
+  const trm = Number(ctx?.settings?.exchange_rate_cop_usd || 3266.78);
   const todayBogota = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
   }).format(new Date());
@@ -499,33 +546,33 @@ REGLAS DE RESPUESTA:
 === CONTEXTO EN VIVO DE LA BASE DE DATOS (NEON POSTGRESQL) ===
 
 1. PATRIMONIO NETO CONSOLIDADO (v_net_worth en COP):
-${JSON.stringify(netWorthRes.rows[0] || {})}
+${JSON.stringify(ctx?.net_worth || {})}
 
 2. CUENTAS ACTIVAS (accounts):
-${JSON.stringify(accountsRes.rows)}
+${JSON.stringify(ctx?.accounts || [])}
 
 3. FLUJO DE CAJA MENSUAL (v_monthly_canvas):
-${JSON.stringify(monthlyCanvasRes.rows)}
+${JSON.stringify(ctx?.monthly_canvas || [])}
 
 4. PORTAFOLIO DE INVERSIONES EN USD (v_portfolio_summary):
-${JSON.stringify(portfolioRes.rows)}
+${JSON.stringify(ctx?.portfolio || [])}
 
 5. ACTIVOS FIJOS (assets) Y PASIVOS/CRÉDITOS (liabilities):
-Activos: ${JSON.stringify(assetsRes.rows)}
-Pasivos: ${JSON.stringify(liabilitiesRes.rows)}
+Activos: ${JSON.stringify(ctx?.assets || [])}
+Pasivos: ${JSON.stringify(ctx?.liabilities || [])}
 
 6. CONSOLIDADO DE MOVIMIENTOS POR MES, CATEGORÍA Y SUBCATEGORÍA:
-${JSON.stringify(categorySummaryRes.rows)}
+${JSON.stringify(ctx?.category_summary || [])}
 
 7. ÚLTIMOS MOVIMIENTOS REGISTRADOS (hasta 120 transacciones recientes):
-${JSON.stringify(recentTransactionsRes.rows)}
+${JSON.stringify(ctx?.recent_transactions || [])}
 
 8. CATÁLOGO OFICIAL DE CATEGORÍAS Y SUBCATEGORÍAS:
-${JSON.stringify(categoriesCatalogRes.rows)}`;
+${JSON.stringify(ctx?.categories_catalog || [])}`;
 
   return {
     systemInstruction,
-    accounts: accountsRes.rows.map((r) => ({
+    accounts: (ctx?.accounts || []).map((r) => ({
       id: String(r.id),
       name: String(r.name),
       type: String(r.type),

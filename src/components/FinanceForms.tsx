@@ -302,6 +302,11 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
         const alternative = accounts.find((a) => a.id !== cuentaOrigenId);
         setCuentaDestinoId(alternative?.id || accounts[0].id);
       }
+    } else if (newTipo === 'ahorro_inversion' && accounts.length > 0) {
+      const savingsAcc = accounts.find(
+        (a) => a.name.toLowerCase().includes('ahorro') && a.id !== cuentaOrigenId
+      );
+      setCuentaDestinoId(savingsAcc ? savingsAcc.id : '');
     }
   };
 
@@ -320,14 +325,14 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
     if (accounts.length > 0 && (!cuentaOrigenId || cuentaOrigenId === 'Cuenta Nu COP')) {
       setCuentaOrigenId(accounts[0].id);
     }
-    if (accounts.length > 0 && !cuentaDestinoId) {
+    if (accounts.length > 0 && !cuentaDestinoId && tipo === 'transferencia') {
       const creditCardAcc = accounts.find((a) =>
         a.type.toLowerCase().includes('tarjeta')
       );
       const secondAcc = accounts.find((a) => a.id !== accounts[0].id);
       setCuentaDestinoId(creditCardAcc?.id || secondAcc?.id || accounts[0].id);
     }
-  }, [accounts, cuentaOrigenId, cuentaDestinoId]);
+  }, [accounts, cuentaOrigenId, cuentaDestinoId, tipo]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -343,9 +348,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       setCuentaOrigenId(
         (editingTransaction.account_id || accounts[0]?.id || 'Cuenta Nu COP') as AccountSource
       );
-      if (editingTransaction.destination_account_id) {
-        setCuentaDestinoId(editingTransaction.destination_account_id as AccountSource);
-      }
+      setCuentaDestinoId((editingTransaction.destination_account_id || '') as AccountSource);
       setCategoriaMacroId(editingTransaction.category_name || 'Alimentación');
       setSubcategoria(editingTransaction.sub_category_name || 'Restaurante');
       setDescripcion(editingTransaction.description || '');
@@ -405,6 +408,8 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       } else if (cuentaDestinoId === cuentaOrigenId) {
         newErrors.cuentaDestinoId = 'La cuenta de origen y destino deben ser diferentes.';
       }
+    } else if (tipo === 'ahorro_inversion' && cuentaDestinoId && cuentaDestinoId === cuentaOrigenId) {
+      newErrors.cuentaDestinoId = 'La cuenta de origen y destino deben ser diferentes.';
     }
 
     if (!subcategoria.trim() || subcategoria.trim().length < 2) {
@@ -430,6 +435,10 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
     const categoryName = selectedCategoryGroup.name;
     const categoryType = selectedCategoryGroup.dbType;
     const numericAmount = parseFloat(monto);
+    const effectiveDestinationAccountId =
+      (tipo === 'transferencia' || tipo === 'ahorro_inversion') && cuentaDestinoId
+        ? cuentaDestinoId
+        : undefined;
 
     try {
       const headers = await buildAuthHeaders();
@@ -444,7 +453,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
         headers,
         body: JSON.stringify({
           accountId: cuentaOrigenId,
-          destinationAccountId: tipo === 'transferencia' ? cuentaDestinoId : undefined,
+          destinationAccountId: effectiveDestinationAccountId,
           date: fecha,
           amount: numericAmount,
           currency: moneda,
@@ -472,7 +481,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
         moneda,
         fecha,
         cuentaOrigenId,
-        cuentaDestinoId: tipo === 'transferencia' ? cuentaDestinoId : undefined,
+        cuentaDestinoId: effectiveDestinationAccountId,
         categoriaMacroId: categoryName,
         subcategoria: subcategoria.trim(),
         descripcion: descripcion.trim(),
@@ -690,8 +699,8 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
 
               <div>
                 <label htmlFor="tx-cuenta" className={styles.label}>
-                  {tipo === 'transferencia'
-                    ? 'Cuenta Origen (De donde sale el pago)'
+                  {tipo === 'transferencia' || tipo === 'ahorro_inversion'
+                    ? 'Cuenta Origen (De donde sale el dinero)'
                     : 'Cuenta / Billetera / Tarjeta'}
                 </label>
                 <select
@@ -724,10 +733,16 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
               </div>
             </div>
 
-            {tipo === 'transferencia' && (
+            {(tipo === 'transferencia' || tipo === 'ahorro_inversion') && (
               <div>
                 <label htmlFor="tx-cuenta-destino" className={styles.label}>
-                  Cuenta Destino / Tarjeta a Pagar <span className={styles.requiredStar}>*</span>
+                  {tipo === 'ahorro_inversion' ? (
+                    'Cuenta Destino (A donde entra el ahorro / inversión)'
+                  ) : (
+                    <>
+                      Cuenta Destino / Tarjeta a Pagar <span className={styles.requiredStar}>*</span>
+                    </>
+                  )}
                 </label>
                 <select
                   id="tx-cuenta-destino"
@@ -742,6 +757,11 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                   aria-invalid={!!errors.cuentaDestinoId}
                   className={styles.inputPurple}
                 >
+                  {tipo === 'ahorro_inversion' && (
+                    <option value="">
+                      — Sin cuenta destino (solo descontar de cuenta origen) —
+                    </option>
+                  )}
                   {accounts.length > 0 ? (
                     accounts.map((acc) => (
                       <option key={acc.id} value={acc.id}>
