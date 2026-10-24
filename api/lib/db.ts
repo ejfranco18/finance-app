@@ -26,15 +26,29 @@ export const pool = new Pool({
   },
   max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: 25000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 pool.on('error', (err) => {
   console.error('Error inesperado en un cliente inactivo del Pool de PostgreSQL:', err);
 });
 
+function isTransientConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  return (
+    msg.includes('timeout exceeded when trying to connect') ||
+    msg.includes('connection terminated unexpectedly') ||
+    msg.includes('econnreset') ||
+    msg.includes('socket hang up') ||
+    msg.includes('client has encountered a connection error')
+  );
+}
+
 /**
- * Helper para ejecutar consultas parametrizadas con manejo y registro automático de errores.
+ * Helper para ejecutar consultas parametrizadas con reintento automático ante conexiones inactivas/cold-start.
  */
 export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
@@ -43,6 +57,15 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
   try {
     return await pool.query<T>(text, params);
   } catch (error) {
+    if (isTransientConnectionError(error)) {
+      console.warn('⚠️ Reconectando al Pool de Neon PostgreSQL tras inactividad/cold-start...');
+      try {
+        return await pool.query<T>(text, params);
+      } catch (retryError) {
+        console.error('Error ejecutando consulta SQL tras reintento:', { text, error: retryError });
+        throw retryError;
+      }
+    }
     console.error('Error ejecutando consulta SQL:', { text, error });
     throw error;
   }

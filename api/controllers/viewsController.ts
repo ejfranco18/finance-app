@@ -5,6 +5,7 @@ import {
   applyDailyCompoundInterest,
 } from '../lib/db';
 import { refreshStaleSecurityPrices } from './investmentController';
+import { ensureProductionTelegramWebhook } from './telegramController';
 
 /**
  * GET /api/canvas/:month
@@ -197,6 +198,9 @@ export async function getCanvasDashboard(req: Request, res: Response) {
     if (!userId) {
       return res.status(400).json({ error: 'Usuario no identificado.' });
     }
+
+    // Asegura en segundo plano que el Webhook 24/7 de Telegram apunte al dominio HTTPS de producción (Vercel)
+    void ensureProductionTelegramWebhook(userId, req);
 
     // Asegura columnas y aplica el interés compuesto diario si ya pasó medianoche (Bogotá)
     await applyDailyCompoundInterest(userId);
