@@ -1572,21 +1572,32 @@
 .reconcileOverlay {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  height: 100dvh;
   z-index: 45;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding-top: max(1rem, env(safe-area-inset-top, 1rem));
+  padding-right: max(0.75rem, env(safe-area-inset-right, 0.75rem));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 1rem));
+  padding-left: max(0.75rem, env(safe-area-inset-left, 0.75rem));
   background-color: rgba(2, 6, 14, 0.82);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .reconcileModalCard {
   width: 100%;
   max-width: 64rem;
   max-height: 90vh;
+  max-height: calc(
+    100dvh - max(1rem, env(safe-area-inset-top, 1rem)) -
+      max(1rem, env(safe-area-inset-bottom, 1rem))
+  );
+  margin: auto 0;
   background-color: #0b1320;
   border: 1px solid #1e324d;
   border-radius: 1.25rem;
@@ -1597,9 +1608,15 @@
   flex-direction: column;
   gap: 1rem;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (min-width: 768px) {
+  .reconcileOverlay {
+    align-items: center;
+    padding: 1rem;
+  }
+
   .reconcileModalCard {
     padding: 1.75rem;
   }

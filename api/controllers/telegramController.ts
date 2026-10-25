@@ -1104,6 +1104,7 @@ export async function syncTelegramUpdates(req: Request, res: Response) {
 }
 
 let localPollerStarted = false;
+let allUsersOnCloudWebhook = false;
 
 /**
  * En desarrollo local (`npm run dev`), ejecuta un listener en segundo plano dentro del servidor Express
@@ -1117,7 +1118,7 @@ export function startLocalTelegramPoller(): void {
 
   let isTickRunning = false;
   setInterval(async () => {
-    if (isTickRunning) return;
+    if (isTickRunning || allUsersOnCloudWebhook) return;
     isTickRunning = true;
     try {
       await ensureAiSettingsColumns();
@@ -1126,8 +1127,14 @@ export function startLocalTelegramPoller(): void {
          FROM user_settings
          WHERE telegram_bot_token_encrypted IS NOT NULL`
       );
-      for (const row of activeUsers.rows) {
-        if (usersWithActiveCloudWebhook.has(row.user_id)) continue;
+      const pendingLocalUsers = activeUsers.rows.filter(
+        (r) => !usersWithActiveCloudWebhook.has(r.user_id)
+      );
+      if (activeUsers.rows.length > 0 && pendingLocalUsers.length === 0) {
+        allUsersOnCloudWebhook = true;
+        return;
+      }
+      for (const row of pendingLocalUsers) {
         await syncTelegramUpdatesForUserId(row.user_id).catch(() => {});
       }
     } catch {
