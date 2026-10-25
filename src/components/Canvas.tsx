@@ -257,9 +257,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [editingTransaction, setEditingTransaction] = useState<TransactionRecord | null>(null);
   const [txInitialDraft, setTxInitialDraft] = useState<InitialTransactionDraft | null>(null);
 
-  // Conciliación de Cuentas (Saldo Calculado vs. Saldo Real en Banco + Tasa de Interés E.A.)
+  // Conciliación de Cuentas (Saldo Calculado vs. Saldo Real en Banco + Saldo Inicial + Tasa de Interés E.A.)
   const [reconcilingAccountId, setReconcilingAccountId] = useState<string | null>(null);
   const [reconcileInputValue, setReconcileInputValue] = useState<string>('');
+  const [reconcileInitialInputValue, setReconcileInitialInputValue] = useState<string>('');
   const [reconcileRateInputValue, setReconcileRateInputValue] = useState<string>('');
   const [reconcileSearchQuery, setReconcileSearchQuery] = useState<string>('');
   const [isSavingReconcile, setIsSavingReconcile] = useState<boolean>(false);
@@ -278,7 +279,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const handleSaveReconciliation = async (
     accountId: string,
     bankBalanceValue: number | null | undefined,
-    annualInterestRateValue?: number
+    annualInterestRateValue?: number,
+    initialBalanceValue?: number
   ) => {
     try {
       setIsSavingReconcile(true);
@@ -303,6 +305,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       if (annualInterestRateValue !== undefined) {
         payload.annualInterestRate = annualInterestRateValue;
       }
+      if (initialBalanceValue !== undefined) {
+        payload.initialBalance = initialBalanceValue;
+      }
 
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/reconcile`, {
         method: 'PUT',
@@ -321,6 +326,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       } else if (bankBalanceValue !== undefined) {
         setReconcileInputValue(String(bankBalanceValue));
         setReconcileSavedMsg('Saldo de banco guardado.');
+      } else if (initialBalanceValue !== undefined) {
+        setReconcileInitialInputValue(String(initialBalanceValue));
+        setReconcileSavedMsg('Saldo inicial actualizado y saldo de la cuenta recalculado.');
       } else if (annualInterestRateValue !== undefined) {
         setReconcileRateInputValue(String(annualInterestRateValue));
         setReconcileSavedMsg('Tasa de interés anual (E.A.) actualizada.');
@@ -604,6 +612,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       acc.reconciled_balance !== undefined &&
       acc.reconciled_balance !== '';
     setReconcileInputValue(hasReconciled ? String(Number(acc.reconciled_balance)) : '');
+    setReconcileInitialInputValue(String(Number(acc.initial_balance || 0)));
     setReconcileRateInputValue(String(Number(acc.annual_interest_rate || 0)));
     setReconcileError(null);
     setReconcileSavedMsg(null);
@@ -798,6 +807,49 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                   <div
                     className={styles.reconcileBtnRow}
                     style={{ marginTop: '6px', alignItems: 'center' }}
+                  >
+                    <label
+                      htmlFor="reconcile-initial-input"
+                      className={styles.cardHintSlate}
+                      style={{ margin: 0 }}
+                    >
+                      Saldo Inicial:
+                    </label>
+                    <input
+                      id="reconcile-initial-input"
+                      type="number"
+                      step="0.01"
+                      value={reconcileInitialInputValue}
+                      onChange={(e) => {
+                        setReconcileInitialInputValue(e.target.value);
+                        setReconcileSavedMsg(null);
+                      }}
+                      className={styles.reconcileInput}
+                      style={{ width: '130px', padding: '5px 8px', fontSize: '12px' }}
+                    />
+                    <button
+                      type="button"
+                      disabled={
+                        isSavingReconcile ||
+                        reconcileInitialInputValue.trim() === '' ||
+                        !Number.isFinite(Number(reconcileInitialInputValue))
+                      }
+                      onClick={() =>
+                        handleSaveReconciliation(
+                          reconcilingAccount.id,
+                          undefined,
+                          undefined,
+                          Number(reconcileInitialInputValue)
+                        )
+                      }
+                      className={styles.reconcileSecondaryBtn}
+                    >
+                      Guardar Inicial
+                    </button>
+                  </div>
+                  <div
+                    className={styles.reconcileBtnRow}
+                    style={{ marginTop: '4px', alignItems: 'center' }}
                   >
                     <label
                       htmlFor="reconcile-rate-input"

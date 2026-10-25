@@ -1,32 +1,51 @@
 .overlay {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  height: 100dvh;
   z-index: 50;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding-top: max(1rem, env(safe-area-inset-top, 1rem));
+  padding-right: max(0.75rem, env(safe-area-inset-right, 0.75rem));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 1rem));
+  padding-left: max(0.75rem, env(safe-area-inset-left, 0.75rem));
   background-color: rgba(0, 0, 0, 0.8);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modalCard {
   width: 100%;
   max-width: 36rem;
+  max-height: calc(100vh - 2rem);
+  max-height: calc(
+    100dvh - max(1rem, env(safe-area-inset-top, 1rem)) -
+      max(1rem, env(safe-area-inset-bottom, 1rem))
+  );
+  margin: auto 0;
   background-color: #0c1422;
   border: 1px solid #1e2f47;
   border-radius: 1.5rem;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.85);
-  padding: 1.5rem;
+  padding: 1.25rem;
   color: #f1f5f9;
   position: relative;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   font-family: var(--font-sans);
 }
 
 @media (min-width: 768px) {
+  .overlay {
+    align-items: center;
+    padding: 1rem;
+  }
+
   .modalCard {
     padding: 2rem;
   }

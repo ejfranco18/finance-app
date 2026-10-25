@@ -269,6 +269,20 @@ export async function reconcileAccount(req: Request, res: Response) {
       }
     }
 
+    const hasInitialBalanceUpdate =
+      req.body?.initialBalance !== undefined &&
+      req.body?.initialBalance !== null &&
+      req.body?.initialBalance !== '';
+    let numericInitialBalance: number | null = null;
+    if (hasInitialBalanceUpdate) {
+      numericInitialBalance = Number(req.body.initialBalance);
+      if (!Number.isFinite(numericInitialBalance)) {
+        return res.status(400).json({
+          error: 'El saldo inicial de la cuenta debe ser un valor numérico válido.',
+        });
+      }
+    }
+
     const hasReconcileUpdate =
       req.body?.reconciledBalance !== undefined || req.body?.clear !== undefined;
     const rawValue = req.body?.reconciledBalance;
@@ -318,6 +332,10 @@ export async function reconcileAccount(req: Request, res: Response) {
            WHEN $5::boolean AND $6::numeric > 0 THEN COALESCE(last_interest_date, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date)
            ELSE last_interest_date
          END,
+         initial_balance = CASE
+           WHEN $7::boolean THEN $8::numeric
+           ELSE initial_balance
+         END,
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $2::uuid
          AND user_id = $3
@@ -325,7 +343,16 @@ export async function reconcileAccount(req: Request, res: Response) {
          id, name, type, currency, initial_balance, current_balance,
          reconciled_balance, reconciled_at, annual_interest_rate,
          accumulated_interest, TO_CHAR(last_interest_date, 'YYYY-MM-DD') AS last_interest_date`,
-      [numericReconciled, accountId, userId, hasReconcileUpdate, hasRateUpdate, numericRate]
+      [
+        numericReconciled,
+        accountId,
+        userId,
+        hasReconcileUpdate,
+        hasRateUpdate,
+        numericRate,
+        hasInitialBalanceUpdate,
+        numericInitialBalance,
+      ]
     );
 
     if (result.rowCount === 0) {
@@ -335,7 +362,9 @@ export async function reconcileAccount(req: Request, res: Response) {
     }
 
     const updated = result.rows[0];
-    const currentBal = Number(updated.current_balance || 0);
+    const currentBal = hasInitialBalanceUpdate
+      ? await updateAccountBalance(userId, accountId)
+      : Number(updated.current_balance || 0);
     const reconciledBal =
       updated.reconciled_balance !== null && updated.reconciled_balance !== undefined
         ? Number(updated.reconciled_balance)
@@ -355,6 +384,7 @@ export async function reconcileAccount(req: Request, res: Response) {
         reconciledAt: updated.reconciled_at,
         annualInterestRate: Number(updated.annual_interest_rate || 0),
         accumulatedInterest: Number(updated.accumulated_interest || 0),
+        accumulated_interest: Number(updated.accumulated_interest || 0),
         lastInterestDate: updated.last_interest_date,
       },
     });
