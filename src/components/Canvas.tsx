@@ -622,6 +622,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   // 1. Cuentas de liquidez inmediata en COP vs Tarjetas de Crédito vs USD / Ahorro / Inversión
   const isCreditCardType = (type: string) =>
     ['tarjeta de crédito', 'tarjeta de credito'].includes(type.toLowerCase());
+  const isSavingsAccount = (acc: AccountRecord) =>
+    acc.type.toLowerCase() === 'ahorro';
 
   const creditCardAccounts = accounts.filter((acc) => isCreditCardType(acc.type));
   const copLiquidAccounts = accounts.filter(
