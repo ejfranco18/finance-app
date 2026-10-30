@@ -249,10 +249,10 @@ export async function getCanvasDashboard(req: Request, res: Response) {
         [userId]
       ),
       query(
-        `SELECT account_id, account_name, ticker, security_name, shares, average_buy_price, current_price, total_cost_basis, current_market_value, unrealized_pnl, pnl_percentage, currency
+        `SELECT id, account_id, account_name, ticker, security_name, shares, average_buy_price, purchase_date, current_price, total_cost_basis, current_market_value, unrealized_pnl, pnl_percentage, currency, last_price_update
          FROM v_portfolio_summary
          WHERE user_id = $1
-         ORDER BY ticker ASC`,
+         ORDER BY ticker ASC, purchase_date DESC`,
         [userId]
       ),
       query(
