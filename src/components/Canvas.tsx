@@ -8,6 +8,7 @@ import {
   AccountFormModal,
   StockHoldingFormModal,
 } from './FinanceForms';
+import { AIAssistantModal } from './AIAssistantModal';
 import {
   Wallet,
   ArrowUpRight,
@@ -37,7 +38,49 @@ interface AccountRecord {
   currency: string;
   initial_balance: string;
   current_balance: string;
+  reconciled_balance?: string | null;
+  reconciled_at?: string | null;
+  annual_interest_rate?: string | number;
+  accumulated_interest?: string | number;
+  last_interest_date?: string | null;
   is_active: boolean;
+}
+
+function getAccountReconciliation(acc: AccountRecord) {
+  const calculated = Number(acc.current_balance || 0);
+  const hasReconciled =
+    acc.reconciled_balance !== null &&
+    acc.reconciled_balance !== undefined &&
+    acc.reconciled_balance !== '';
+  const bankBalance = hasReconciled ? Number(acc.reconciled_balance) : null;
+  const diff =
+    bankBalance !== null && Number.isFinite(bankBalance)
+      ? Number((bankBalance - calculated).toFixed(2))
+      : null;
+  const isDiscrepant = diff !== null && Math.abs(diff) >= 0.01;
+  const isMatched = diff !== null && Math.abs(diff) < 0.01;
+
+  const annualRate = Number(acc.annual_interest_rate || 0);
+  const accumulatedInterest = Number(acc.accumulated_interest || 0);
+  const dailyRateFactor =
+    annualRate > 0 ? Math.pow(1 + annualRate / 100, 1 / 365) - 1 : 0;
+  const estimatedDailyGain =
+    annualRate > 0 && calculated > 0
+      ? Number((calculated * dailyRateFactor).toFixed(2))
+      : 0;
+
+  return {
+    calculated,
+    hasReconciled,
+    bankBalance,
+    diff,
+    isDiscrepant,
+    isMatched,
+    annualRate,
+    accumulatedInterest,
+    dailyRateFactor,
+    estimatedDailyGain,
+  };
 }
 
 interface MonthlyCanvasRecord {
@@ -150,9 +193,8 @@ const MONTH_NAMES: Record<string, string> = {
 };
 
 function formatNumberCOP(value: number): string {
-  const hasDecimals = Math.abs(value % 1) > 0.001;
   return new Intl.NumberFormat('es-CO', {
-    minimumFractionDigits: hasDecimals ? 2 : 0,
+    minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
 }
@@ -212,6 +254,17 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [deletingTxId, setDeletingTxId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<TransactionRecord | null>(null);
+  const [txInitialDraft, setTxInitialDraft] = useState<InitialTransactionDraft | null>(null);
+
+  // Conciliación de Cuentas (Saldo Calculado vs. Saldo Real en Banco + Saldo Inicial + Tasa de Interés E.A.)
+  const [reconcilingAccountId, setReconcilingAccountId] = useState<string | null>(null);
+  const [reconcileInputValue, setReconcileInputValue] = useState<string>('');
+  const [reconcileInitialInputValue, setReconcileInitialInputValue] = useState<string>('');
+  const [reconcileRateInputValue, setReconcileRateInputValue] = useState<string>('');
+  const [reconcileSearchQuery, setReconcileSearchQuery] = useState<string>('');
+  const [isSavingReconcile, setIsSavingReconcile] = useState<boolean>(false);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
+  const [reconcileSavedMsg, setReconcileSavedMsg] = useState<string | null>(null);
 
   // Stock Holdings (Lotes de Acciones) state
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
@@ -224,6 +277,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
   const [isPeriodModalOpen, setIsPeriodModalOpen] = useState(false);
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
 
@@ -525,6 +579,48 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const usdAccountNamesLabel =
     usdAccounts.length > 0 ? usdAccounts.map((a) => a.name).join(', ') : 'Sin cuentas USD';
 
+  const discrepantAccounts = accounts.filter((acc) => getAccountReconciliation(acc).isDiscrepant);
+  const discrepantUsdAccounts = usdAccounts.filter(
+    (acc) => getAccountReconciliation(acc).isDiscrepant
+  );
+
+  const openAccountReconciliation = (accountId: string) => {
+    const acc = accounts.find((a) => a.id === accountId) || accounts[0];
+    if (!acc) return;
+    setReconcilingAccountId(acc.id);
+    const hasReconciled =
+      acc.reconciled_balance !== null &&
+      acc.reconciled_balance !== undefined &&
+      acc.reconciled_balance !== '';
+    setReconcileInputValue(hasReconciled ? String(Number(acc.reconciled_balance)) : '');
+    setReconcileInitialInputValue(String(Number(acc.initial_balance || 0)));
+    setReconcileRateInputValue(String(Number(acc.annual_interest_rate || 0)));
+    setReconcileError(null);
+    setReconcileSavedMsg(null);
+    setReconcileSearchQuery('');
+    setConfirmDeleteTxId(null);
+  };
+
+  const reconcilingAccount = accounts.find((a) => a.id === reconcilingAccountId) || null;
+  const reconcilingAccountTxAll = reconcilingAccount
+    ? allTransactions.filter(
+        (tx) =>
+          tx.account_id === reconcilingAccount.id ||
+          tx.destination_account_id === reconcilingAccount.id
+      )
+    : [];
+  const normalizedSearch = reconcileSearchQuery.trim().toLowerCase();
+  const reconcilingAccountTransactions = normalizedSearch
+    ? reconcilingAccountTxAll.filter(
+        (tx) =>
+          tx.description.toLowerCase().includes(normalizedSearch) ||
+          tx.category_name.toLowerCase().includes(normalizedSearch) ||
+          tx.sub_category_name.toLowerCase().includes(normalizedSearch) ||
+          tx.date.includes(normalizedSearch) ||
+          String(tx.amount).includes(normalizedSearch)
+      )
+    : reconcilingAccountTxAll;
+
   return (
     <div className={styles.page}>
       {/* Modales Interactivos */}
@@ -533,10 +629,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         onClose={() => {
           setIsTxModalOpen(false);
           setEditingTransaction(null);
+          setTxInitialDraft(null);
         }}
         accounts={accounts}
         trm={trm}
         editingTransaction={editingTransaction}
+        initialDraft={txInitialDraft}
       />
       <AccountFormModal
         isOpen={isAccountModalOpen}
@@ -568,6 +666,535 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           }
         }}
       />
+      <AIAssistantModal
+        isOpen={isAiModalOpen}
+        onClose={() => setIsAiModalOpen(false)}
+        onOpenTransactionDraft={(draft) => {
+          setIsAiModalOpen(false);
+          setEditingTransaction(null);
+          setTxInitialDraft(draft);
+          setIsTxModalOpen(true);
+        }}
+      />
+
+      {/* Modal de Detalle y Conciliación Bancaria (Saldo Calculado vs. Saldo Real en Banco) */}
+      {reconcilingAccount && (() => {
+        const fmtAcc =
+          reconcilingAccount.currency === 'USD' ? formatCurrencyUSD : formatCurrencyCOP;
+        const calcBal = Number(reconcilingAccount.current_balance || 0);
+        const initBal = Number(reconcilingAccount.initial_balance || 0);
+        const savedInfo = getAccountReconciliation(reconcilingAccount);
+        const netTxEffect = Number(
+          (calcBal - initBal - savedInfo.accumulatedInterest).toFixed(2)
+        );
+        const parsedInput =
+          reconcileInputValue.trim() !== '' ? Number(reconcileInputValue) : null;
+        const effectiveBankVal =
+          parsedInput !== null && Number.isFinite(parsedInput)
+            ? parsedInput
+            : savedInfo.bankBalance;
+        const liveDiff =
+          effectiveBankVal !== null && Number.isFinite(effectiveBankVal)
+            ? Number((effectiveBankVal - calcBal).toFixed(2))
+            : null;
+        const liveIsDiscrepant = liveDiff !== null && Math.abs(liveDiff) >= 0.01;
+        const liveIsMatched = liveDiff !== null && Math.abs(liveDiff) < 0.01;
+
+        return (
+          <div className={styles.reconcileOverlay}>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="reconcile-modal-title"
+              className={styles.reconcileModalCard}
+            >
+              <div className={styles.reconcileModalHeader}>
+                <div>
+                  <h2 id="reconcile-modal-title" className={styles.taxonomyTitle}>
+                    Conciliación y Detalle de Cuenta · {reconcilingAccount.name} (
+                    {reconcilingAccount.type} · {reconcilingAccount.currency})
+                  </h2>
+                  <p className={styles.taxonomySubtitle}>
+                    Compara el saldo calculado por tus movimientos e interés compuesto contra el
+                    saldo real que ves hoy en tu banco o billetera.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReconcilingAccountId(null)}
+                  className={styles.cancelDeleteBtn}
+                  aria-label="Cerrar conciliación"
+                >
+                  <X className={styles.btnIcon} />
+                </button>
+              </div>
+
+              {/* Selector rápido entre todas las cuentas activas */}
+              <div className={styles.reconcileAccountTabs}>
+                {accounts.map((acc) => {
+                  const status = getAccountReconciliation(acc);
+                  const isCurrent = acc.id === reconcilingAccount.id;
+                  return (
+                    <button
+                      key={acc.id}
+                      type="button"
+                      onClick={() => openAccountReconciliation(acc.id)}
+                      className={`${styles.reconcileAccountPill} ${
+                        isCurrent ? styles.reconcileAccountPillActive : ''
+                      } ${
+                        !isCurrent && status.isDiscrepant
+                          ? styles.reconcileAccountPillDiscrepant
+                          : ''
+                      }`}
+                    >
+                      <span>{acc.name}</span>
+                      {status.annualRate > 0 && (
+                        <span style={{ opacity: 0.75, fontSize: '10px' }}>
+                          {status.annualRate}% E.A.
+                        </span>
+                      )}
+                      {status.isDiscrepant && <span>⚠️</span>}
+                      {status.isMatched && <span>✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {reconcileError && (
+                <div className={styles.errorCard}>
+                  <span>{reconcileError}</span>
+                </div>
+              )}
+
+              {/* Comparador Estilo Excel: 1. Calculado | 2. Real en Banco | 3. Diferencia */}
+              <div className={styles.reconcileComparisonGrid}>
+                {/* 1. Saldo Calculado en la App */}
+                <div className={styles.reconcileBox}>
+                  <div>
+                    <span className={styles.cardLabel}>1. Saldo Calculado (En la App)</span>
+                    <div className={styles.patrimonyValueCyan}>{fmtAcc(calcBal)}</div>
+                  </div>
+                  <div className={styles.cardHintSlate}>
+                    Saldo Inicial: <strong>{fmtAcc(initBal)}</strong> · Movimientos (
+                    {reconcilingAccountTxAll.length}):{' '}
+                    <strong className={netTxEffect >= 0 ? styles.monoEmerald : styles.monoRose}>
+                      {netTxEffect >= 0 ? '+' : '-'}
+                      {fmtAcc(Math.abs(netTxEffect))}
+                    </strong>
+                    {savedInfo.annualRate > 0 && (
+                      <>
+                        <br />
+                        Interés Compuesto ({savedInfo.annualRate}% E.A. ·{' '}
+                        {(savedInfo.dailyRateFactor * 100).toFixed(4)}%/día):{' '}
+                        <strong className={styles.monoEmerald}>
+                          +{fmtAcc(savedInfo.accumulatedInterest)} acum.
+                        </strong>{' '}
+                        (Est. hoy: <strong>+{fmtAcc(savedInfo.estimatedDailyGain)}/día</strong>)
+                      </>
+                    )}
+                  </div>
+                  <div
+                    className={styles.reconcileBtnRow}
+                    style={{ marginTop: '6px', alignItems: 'center' }}
+                  >
+                    <label
+                      htmlFor="reconcile-initial-input"
+                      className={styles.cardHintSlate}
+                      style={{ margin: 0 }}
+                    >
+                      Saldo Inicial:
+                    </label>
+                    <input
+                      id="reconcile-initial-input"
+                      type="number"
+                      step="0.01"
+                      value={reconcileInitialInputValue}
+                      onChange={(e) => {
+                        setReconcileInitialInputValue(e.target.value);
+                        setReconcileSavedMsg(null);
+                      }}
+                      className={styles.reconcileInput}
+                      style={{ width: '130px', padding: '5px 8px', fontSize: '12px' }}
+                    />
+                    <button
+                      type="button"
+                      disabled={
+                        isSavingReconcile ||
+                        reconcileInitialInputValue.trim() === '' ||
+                        !Number.isFinite(Number(reconcileInitialInputValue))
+                      }
+                      onClick={() =>
+                        handleSaveReconciliation(
+                          reconcilingAccount.id,
+                          undefined,
+                          undefined,
+                          Number(reconcileInitialInputValue)
+                        )
+                      }
+                      className={styles.reconcileSecondaryBtn}
+                    >
+                      Guardar Inicial
+                    </button>
+                  </div>
+                  <div
+                    className={styles.reconcileBtnRow}
+                    style={{ marginTop: '4px', alignItems: 'center' }}
+                  >
+                    <label
+                      htmlFor="reconcile-rate-input"
+                      className={styles.cardHintSlate}
+                      style={{ margin: 0 }}
+                    >
+                      Tasa E.A. (%):
+                    </label>
+                    <input
+                      id="reconcile-rate-input"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="100"
+                      value={reconcileRateInputValue}
+                      onChange={(e) => {
+                        setReconcileRateInputValue(e.target.value);
+                        setReconcileSavedMsg(null);
+                      }}
+                      className={styles.reconcileInput}
+                      style={{ width: '90px', padding: '5px 8px', fontSize: '12px' }}
+                    />
+                    <button
+                      type="button"
+                      disabled={
+                        isSavingReconcile ||
+                        reconcileRateInputValue.trim() === '' ||
+                        !Number.isFinite(Number(reconcileRateInputValue))
+                      }
+                      onClick={() =>
+                        handleSaveReconciliation(
+                          reconcilingAccount.id,
+                          undefined,
+                          Number(reconcileRateInputValue)
+                        )
+                      }
+                      className={styles.reconcileSecondaryBtn}
+                    >
+                      Guardar % E.A.
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Saldo Real en el Banco (Editable) */}
+                <div className={styles.reconcileBox}>
+                  <div>
+                    <label htmlFor="reconcile-bank-input" className={styles.cardLabel}>
+                      2. Saldo Real (En tu Banco / Efectivo)
+                    </label>
+                    <div className={styles.reconcileInputRow}>
+                      <input
+                        id="reconcile-bank-input"
+                        type="number"
+                        step="0.01"
+                        placeholder={`ej. ${calcBal}`}
+                        value={reconcileInputValue}
+                        onChange={(e) => {
+                          setReconcileInputValue(e.target.value);
+                          setReconcileSavedMsg(null);
+                        }}
+                        className={styles.reconcileInput}
+                      />
+                    </div>
+                  </div>
+                  <div className={styles.reconcileBtnRow}>
+                    <button
+                      type="button"
+                      disabled={
+                        isSavingReconcile ||
+                        reconcileInputValue.trim() === '' ||
+                        !Number.isFinite(Number(reconcileInputValue))
+                      }
+                      onClick={() =>
+                        handleSaveReconciliation(
+                          reconcilingAccount.id,
+                          Number(reconcileInputValue)
+                        )
+                      }
+                      className={styles.reconcileSaveBtn}
+                    >
+                      {isSavingReconcile ? 'Guardando...' : 'Guardar Saldo Banco'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSavingReconcile}
+                      onClick={() => handleSaveReconciliation(reconcilingAccount.id, calcBal)}
+                      className={styles.reconcileSecondaryBtn}
+                      title="Marca la cuenta como cuadrada con el saldo calculado actual"
+                    >
+                      = Igualar al Calculado
+                    </button>
+                    {savedInfo.hasReconciled && (
+                      <button
+                        type="button"
+                        disabled={isSavingReconcile}
+                        onClick={() => handleSaveReconciliation(reconcilingAccount.id, null)}
+                        className={styles.reconcileSecondaryBtn}
+                      >
+                        Limpiar
+                      </button>
+                    )}
+                    {reconcileSavedMsg && (
+                      <span className={styles.monoEmerald} style={{ fontSize: '11px' }}>
+                        ✓ {reconcileSavedMsg}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 3. Diferencia / Semáforo de Validación */}
+                <div
+                  className={
+                    liveIsDiscrepant
+                      ? styles.reconcileBoxDiscrepancy
+                      : liveIsMatched
+                        ? styles.reconcileBoxMatched
+                        : styles.reconcileBox
+                  }
+                >
+                  <div>
+                    <span className={styles.cardLabel}>
+                      3. Diferencia (Banco vs. Calculado)
+                    </span>
+                    {liveDiff === null ? (
+                      <div className={styles.kpiValueWhite}>Sin validar aún</div>
+                    ) : liveIsMatched ? (
+                      <div className={styles.patrimonyValueEmerald}>
+                        ✓ {fmtAcc(0)} (Cuadrado)
+                      </div>
+                    ) : (
+                      <div className={styles.patrimonyValueRose}>
+                        ⚠️ {liveDiff > 0 ? '+' : '-'}
+                        {fmtAcc(Math.abs(liveDiff))}
+                      </div>
+                    )}
+                  </div>
+
+                  {liveDiff === null ? (
+                    <div className={styles.cardHintSlate}>
+                      Ingresa el saldo que ves en tu banco para verificar si coincide con la app.
+                    </div>
+                  ) : liveIsMatched ? (
+                    <div className={styles.cardHintSlate}>
+                      <CheckCircle2
+                        className={styles.btnIcon}
+                        style={{ verticalAlign: 'middle', marginRight: '4px', color: '#34d399' }}
+                      />
+                      El saldo calculado coincide exactamente con el valor real de tu banco.
+                    </div>
+                  ) : (
+                    <div>
+                      <div className={styles.cardHintSlate}>
+                        {liveDiff < 0
+                          ? `Hay ${fmtAcc(Math.abs(liveDiff))} menos en el banco que en la app (posible gasto o cobro no anotado).`
+                          : `Hay ${fmtAcc(Math.abs(liveDiff))} más en el banco que en la app (posible ingreso no anotado o gasto registrado de más).`}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingTransaction(null);
+                          setTxInitialDraft({
+                            tipo: liveDiff < 0 ? 'gasto' : 'ingreso',
+                            monto: Number(Math.abs(liveDiff).toFixed(2)),
+                            moneda: reconcilingAccount.currency === 'USD' ? 'USD' : 'COP',
+                            cuentaOrigenId: reconcilingAccount.id,
+                            categoriaMacroId:
+                              liveDiff < 0 ? 'Otros' : 'Ingresos Variables',
+                            subcategoria:
+                              liveDiff < 0 ? 'Otros gastos' : 'Otros ingresos variables',
+                            descripcion: 'Ajuste / movimiento detectado en conciliación bancaria',
+                          });
+                          setIsTxModalOpen(true);
+                        }}
+                        className={styles.reconcileFixActionBtn}
+                      >
+                        <Plus className={styles.btnIcon} />
+                        <span>
+                          Registrar {liveDiff < 0 ? 'Gasto' : 'Ingreso'} faltante por{' '}
+                          {fmtAcc(Math.abs(liveDiff))}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Barra de herramientas del historial de la cuenta */}
+              <div className={styles.reconcileToolbar}>
+                <div>
+                  <h3 className={styles.taxonomyTitle}>
+                    Movimientos de {reconcilingAccount.name} ({reconcilingAccountTransactions.length}{' '}
+                    {reconcilingAccountTransactions.length === 1 ? 'registro' : 'registros'})
+                  </h3>
+                  <p className={styles.taxonomySubtitle}>
+                    Revisa, edita o elimina movimientos de esta cuenta para investigar cualquier
+                    diferencia.
+                  </p>
+                </div>
+
+                <div className={styles.actionControls}>
+                  <input
+                    type="search"
+                    placeholder="Buscar por descripción, categoría o monto..."
+                    value={reconcileSearchQuery}
+                    onChange={(e) => setReconcileSearchQuery(e.target.value)}
+                    className={styles.reconcileSearchInput}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTransaction(null);
+                      setTxInitialDraft({
+                        tipo: 'gasto',
+                        moneda: reconcilingAccount.currency === 'USD' ? 'USD' : 'COP',
+                        cuentaOrigenId: reconcilingAccount.id,
+                      });
+                      setIsTxModalOpen(true);
+                    }}
+                    className={styles.primaryBtn}
+                  >
+                    <Plus className={styles.btnIcon} />
+                    <span>+ Movimiento en {reconcilingAccount.name}</span>
+                  </button>
+                </div>
+              </div>
+
+              {deleteError && (
+                <div className={styles.errorCard}>
+                  <span>{deleteError}</span>
+                </div>
+              )}
+
+              {/* Tabla de movimientos de la cuenta */}
+              {reconcilingAccountTransactions.length === 0 ? (
+                <div className={styles.stateCard}>
+                  No se encontraron movimientos para {reconcilingAccount.name}.
+                </div>
+              ) : (
+                <div className={styles.tableWrapper}>
+                  <table className={styles.table}>
+                    <thead className={styles.tableHead}>
+                      <tr>
+                        <th className={styles.th}>Fecha</th>
+                        <th className={styles.th}>Descripción</th>
+                        <th className={styles.th}>Categoría / Subcategoría</th>
+                        <th className={styles.th}>Tipo</th>
+                        <th className={styles.thRight}>Impacto en {reconcilingAccount.name}</th>
+                        <th className={styles.thRight}>Acción</th>
+                      </tr>
+                    </thead>
+                    <tbody className={styles.tableBody}>
+                      {reconcilingAccountTransactions.map((tx) => {
+                        const txAmount = Number(tx.amount || 0);
+                        const isPositiveForThisAccount =
+                          (tx.account_id === reconcilingAccount.id &&
+                            (tx.category_type === 'INGRESO_FIJO' ||
+                              tx.category_type === 'INGRESO_VARIABLE')) ||
+                          (tx.destination_account_id === reconcilingAccount.id &&
+                            (tx.category_type === 'TRANSFERENCIA' ||
+                              tx.category_type === 'AHORRO' ||
+                              tx.category_type === 'INVERSION'));
+                        const isConfirming = confirmDeleteTxId === tx.id;
+                        const isDeleting = deletingTxId === tx.id;
+                        const fmtTx =
+                          tx.currency === 'USD' ? formatCurrencyUSD : formatCurrencyCOP;
+
+                        return (
+                          <tr key={tx.id} className={styles.tr}>
+                            <td className={styles.tdDate}>{tx.date}</td>
+                            <td className={styles.tdMonth}>
+                              {tx.description || tx.sub_category_name}
+                            </td>
+                            <td className={styles.tdCategory}>
+                              <span className={styles.txCategoryMain}>{tx.category_name}</span>
+                              <span className={styles.txSubcategoryMuted}>
+                                {' '}
+                                · {tx.sub_category_name}
+                              </span>
+                            </td>
+                            <td className={styles.tdType}>
+                              <span
+                                className={
+                                  isPositiveForThisAccount
+                                    ? styles.txTypeBadgeEmerald
+                                    : tx.category_type === 'GASTO'
+                                      ? styles.txTypeBadgeRose
+                                      : styles.txTypeBadgeCyan
+                                }
+                              >
+                                {formatCategoryTypeLabel(tx.category_type)}
+                              </span>
+                            </td>
+                            <td
+                              className={
+                                isPositiveForThisAccount ? styles.tdIncome : styles.tdExpense
+                              }
+                            >
+                              {isPositiveForThisAccount ? '+' : '-'}
+                              {fmtTx(txAmount)}
+                            </td>
+                            <td className={styles.tdAction}>
+                              {isConfirming ? (
+                                <div className={styles.confirmActionGroup}>
+                                  <button
+                                    type="button"
+                                    disabled={isDeleting}
+                                    onClick={() => handleDeleteTransaction(tx.id)}
+                                    className={styles.confirmDeleteBtn}
+                                  >
+                                    {isDeleting ? 'Eliminando...' : 'Confirmar'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isDeleting}
+                                    onClick={() => setConfirmDeleteTxId(null)}
+                                    className={styles.cancelDeleteBtn}
+                                  >
+                                    Cancelar
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className={styles.actionBtnGroup}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingTransaction(tx);
+                                      setTxInitialDraft(null);
+                                      setIsTxModalOpen(true);
+                                    }}
+                                    className={styles.editTxBtn}
+                                  >
+                                    <Pencil className={styles.deleteIcon} />
+                                    <span>Editar</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteTxId(tx.id)}
+                                    className={styles.deleteTxBtn}
+                                  >
+                                    <Trash2 className={styles.deleteIcon} />
+                                    <span>Eliminar</span>
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Top Bar Navigation */}
       <header className={styles.header}>
@@ -595,6 +1222,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           <button
             onClick={() => {
               setEditingTransaction(null);
+              setTxInitialDraft(null);
               setIsTxModalOpen(true);
             }}
             className={styles.primaryBtn}
@@ -622,6 +1250,20 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           <button onClick={() => setIsAssetModalOpen(true)} className={styles.secondaryCyanBtn}>
             <Building className={styles.btnIcon} />
             <span>+ Activo / Deuda</span>
+          </button>
+
+          <button
+            onClick={() => setIsAiModalOpen(true)}
+            className={styles.secondaryCyanBtn}
+            style={{
+              backgroundColor: 'rgba(168, 85, 247, 0.14)',
+              borderColor: 'rgba(192, 132, 252, 0.45)',
+              color: '#e9d5ff',
+            }}
+            title="Abrir Copiloto Financiero IA (Contexto Neon DB + Configuración de API Key por usuario)"
+          >
+            <Sparkles className={styles.btnIcon} style={{ color: '#c084fc' }} />
+            <span>Copiloto IA</span>
           </button>
 
           <button onClick={() => setIsPeriodModalOpen(true)} className={styles.periodBtn}>
@@ -718,61 +1360,205 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     </div>
                   </div>
 
-                  <div className={styles.heroAccessibleBadge}>
-                    <span>✓ 100% Accesible para Flujo de Caja Operativo</span>
+                  <div className={styles.heroActionsRow}>
+                    <div className={styles.heroAccessibleBadge}>
+                      <span>✓ 100% Accesible para Flujo de Caja Operativo</span>
+                    </div>
+
+                    {accounts.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openAccountReconciliation(
+                            discrepantAccounts[0]?.id || accounts[0].id
+                          )
+                        }
+                        className={
+                          discrepantAccounts.length > 0
+                            ? styles.reconcileHeroBtnAlert
+                            : styles.reconcileHeroBtn
+                        }
+                      >
+                        {discrepantAccounts.length > 0 ? (
+                          <>
+                            <AlertTriangle className={styles.btnIcon} />
+                            <span>
+                              {discrepantAccounts.length}{' '}
+                              {discrepantAccounts.length === 1
+                                ? 'cuenta con descuadre'
+                                : 'cuentas con descuadre'}{' '}
+                              · Revisar
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Scale className={styles.btnIcon} />
+                            <span>Conciliar Saldos con Banco</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                {/* Sub-account badges from Neon DB */}
+                {/* Sub-account badges from Neon DB (Clicables para Conciliación Estilo Excel) */}
                 <div className={styles.subAccountsGrid}>
-                  {copLiquidAccounts.map((acc, idx) => (
-                    <div key={acc.id} className={styles.subAccountCard}>
-                      <div className={styles.subAccountLabel}>{acc.name}</div>
-                      <div className={styles.subAccountTitle}>{acc.type}</div>
-                      <div
-                        className={
-                          idx % 2 === 0
-                            ? styles.subAccountAmountEmerald
-                            : styles.subAccountAmountCyan
-                        }
+                  {copLiquidAccounts.map((acc, idx) => {
+                    const rec = getAccountReconciliation(acc);
+                    const cardClass = rec.isDiscrepant
+                      ? styles.subAccountCardDiscrepancy
+                      : rec.isMatched
+                        ? styles.subAccountCardMatched
+                        : styles.subAccountCardInteractive;
+
+                    return (
+                      <button
+                        key={acc.id}
+                        type="button"
+                        onClick={() => openAccountReconciliation(acc.id)}
+                        className={cardClass}
+                        title="Haz clic para ver detalle de movimientos y validar saldo real con el banco"
                       >
-                        {formatCurrencyCOP(Number(acc.current_balance))}
-                      </div>
-                    </div>
-                  ))}
+                        <div>
+                          <div className={styles.subAccountTopRow}>
+                            <span className={styles.subAccountLabel}>{acc.name}</span>
+                            {rec.isDiscrepant && (
+                              <span className={styles.reconcileStatusBadgeRed}>⚠️ Descuadre</span>
+                            )}
+                            {rec.isMatched && (
+                              <span className={styles.reconcileStatusBadgeGreen}>✓ Cuadrado</span>
+                            )}
+                          </div>
+                          <div className={styles.subAccountTitle}>
+                            {acc.type}
+                            {rec.annualRate > 0 ? ` · ${rec.annualRate}% E.A.` : ''}
+                          </div>
+                          <div
+                            className={
+                              rec.isDiscrepant
+                                ? styles.subAccountAmountRose
+                                : idx % 2 === 0
+                                  ? styles.subAccountAmountEmerald
+                                  : styles.subAccountAmountCyan
+                            }
+                          >
+                            {formatCurrencyCOP(Number(acc.current_balance))}
+                          </div>
+                          {rec.annualRate > 0 && rec.estimatedDailyGain > 0 && (
+                            <div className={styles.reconcileBankLineMuted}>
+                              +{formatCurrencyCOP(rec.estimatedDailyGain)}/día
+                              {rec.accumulatedInterest > 0
+                                ? ` · Acum: +${formatCurrencyCOP(rec.accumulatedInterest)}`
+                                : ''}
+                            </div>
+                          )}
+                        </div>
+
+                        {rec.isDiscrepant && rec.bankBalance !== null && rec.diff !== null ? (
+                          <div>
+                            <div className={styles.reconcileBankLineMuted}>
+                              Banco: {formatCurrencyCOP(rec.bankBalance)}
+                            </div>
+                            <div className={styles.reconcileDiffLineRed}>
+                              Dif: {rec.diff > 0 ? '+' : '-'}
+                              {formatCurrencyCOP(Math.abs(rec.diff))}
+                            </div>
+                          </div>
+                        ) : rec.isMatched ? (
+                          <div className={styles.reconcileBankLineMuted}>
+                            Igual al banco · Ver detalle →
+                          </div>
+                        ) : (
+                          <div className={styles.reconcileHintLink}>Validar saldo banco →</div>
+                        )}
+                      </button>
+                    );
+                  })}
 
                   {creditCardAccounts.map((acc) => {
                     const balance = Number(acc.current_balance || 0);
                     const hasDebt = balance < 0;
-                    const formattedDebt =
-                      acc.currency === 'USD'
-                        ? formatCurrencyUSD(Math.abs(balance))
-                        : formatCurrencyCOP(Math.abs(balance));
+                    const fmtAcc =
+                      acc.currency === 'USD' ? formatCurrencyUSD : formatCurrencyCOP;
+                    const formattedDebt = fmtAcc(Math.abs(balance));
+                    const rec = getAccountReconciliation(acc);
+                    const cardClass = rec.isDiscrepant
+                      ? styles.subAccountCardDiscrepancy
+                      : hasDebt
+                        ? styles.subAccountCardRose
+                        : styles.subAccountCardInteractive;
+
                     return (
-                      <div
+                      <button
                         key={acc.id}
-                        className={hasDebt ? styles.subAccountCardRose : styles.subAccountCard}
+                        type="button"
+                        onClick={() => openAccountReconciliation(acc.id)}
+                        className={cardClass}
+                        title="Haz clic para conciliar tarjeta de crédito"
                       >
-                        <div className={styles.subAccountLabel}>{acc.name}</div>
-                        <div className={styles.subAccountTitle}>{acc.type}</div>
-                        <div
-                          className={
-                            hasDebt ? styles.subAccountAmountRose : styles.subAccountAmountEmerald
-                          }
-                        >
-                          {hasDebt ? `Deuda Actual: ${formattedDebt}` : `${formattedDebt} (Al día)`}
+                        <div>
+                          <div className={styles.subAccountTopRow}>
+                            <span className={styles.subAccountLabel}>{acc.name}</span>
+                            {rec.isDiscrepant && (
+                              <span className={styles.reconcileStatusBadgeRed}>⚠️ Descuadre</span>
+                            )}
+                            {rec.isMatched && (
+                              <span className={styles.reconcileStatusBadgeGreen}>✓ Cuadrado</span>
+                            )}
+                          </div>
+                          <div className={styles.subAccountTitle}>{acc.type}</div>
+                          <div
+                            className={
+                              hasDebt || rec.isDiscrepant
+                                ? styles.subAccountAmountRose
+                                : styles.subAccountAmountEmerald
+                            }
+                          >
+                            {hasDebt ? `Deuda Actual: ${formattedDebt}` : `${formattedDebt} (Al día)`}
+                          </div>
                         </div>
-                      </div>
+                        {rec.isDiscrepant && rec.diff !== null ? (
+                          <div className={styles.reconcileDiffLineRed}>
+                            Dif: {rec.diff > 0 ? '+' : '-'}
+                            {fmtAcc(Math.abs(rec.diff))}
+                          </div>
+                        ) : (
+                          <div className={styles.reconcileHintLink}>Validar saldo TC →</div>
+                        )}
+                      </button>
                     );
                   })}
 
-                  <div className={styles.subAccountCard}>
-                    <div className={styles.subAccountLabel}>Cuentas USD / Broker</div>
-                    <div className={styles.subAccountTitle}>{usdAccountNamesLabel}</div>
-                    <div className={styles.subAccountAmountAmber}>
-                      {formatCurrencyUSD(totalUsdAccountsBalance)}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetUsd =
+                        discrepantUsdAccounts[0]?.id ||
+                        usdAccounts[0]?.id ||
+                        accounts[0]?.id;
+                      if (targetUsd) openAccountReconciliation(targetUsd);
+                    }}
+                    className={
+                      discrepantUsdAccounts.length > 0
+                        ? styles.subAccountCardDiscrepancy
+                        : styles.subAccountCardInteractive
+                    }
+                    title="Haz clic para conciliar tus cuentas en USD"
+                  >
+                    <div>
+                      <div className={styles.subAccountTopRow}>
+                        <span className={styles.subAccountLabel}>Cuentas USD / Broker</span>
+                        {discrepantUsdAccounts.length > 0 && (
+                          <span className={styles.reconcileStatusBadgeRed}>⚠️ Descuadre</span>
+                        )}
+                      </div>
+                      <div className={styles.subAccountTitle}>{usdAccountNamesLabel}</div>
+                      <div className={styles.subAccountAmountAmber}>
+                        {formatCurrencyUSD(totalUsdAccountsBalance)}
+                      </div>
                     </div>
-                  </div>
+                    <div className={styles.reconcileHintLink}>Validar cuentas USD →</div>
+                  </button>
 
                   <div className={styles.subAccountCard}>
                     <div className={styles.subAccountLabel}>Disponibilidad</div>
@@ -888,12 +1674,43 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
               </div>
 
               <div className={styles.savingsGrid4}>
-                <div className={styles.savingsCardCop}>
-                  <span className={styles.cardLabel}>Ahorro Total COP</span>
+                <div
+                  className={styles.savingsCardCop}
+                  style={{ cursor: copSavingsAccounts.length > 0 ? 'pointer' : 'default' }}
+                  onClick={() => {
+                    if (copSavingsAccounts[0]) {
+                      openAccountReconciliation(copSavingsAccounts[0].id);
+                    }
+                  }}
+                  title={
+                    copSavingsAccounts[0]
+                      ? `Haz clic para ver detalle y conciliación de ${copSavingsAccounts[0].name}`
+                      : undefined
+                  }
+                >
+                  <span className={styles.cardLabel}>
+                    Ahorro Total COP
+                    {copSavingsAccounts.length > 0
+                      ? ` (${copSavingsAccounts.map((a) => a.name).join(', ')})`
+                      : ''}
+                  </span>
                   <div className={styles.cardValueEmerald}>
                     {formatCurrencyCOP(totalSavingsCop)}
                   </div>
-                  <div className={styles.cardHintMuted}>Cuentas y movimientos tipo Ahorro</div>
+                  <div className={styles.cardHintMuted}>
+                    {copSavingsAccounts.length > 0 &&
+                    getAccountReconciliation(copSavingsAccounts[0]).annualRate > 0 ? (
+                      <>
+                        {getAccountReconciliation(copSavingsAccounts[0]).annualRate}% E.A. · +
+                        {formatCurrencyCOP(
+                          getAccountReconciliation(copSavingsAccounts[0]).estimatedDailyGain
+                        )}
+                        /día · Ver detalle →
+                      </>
+                    ) : (
+                      'Cuentas y movimientos tipo Ahorro'
+                    )}
+                  </div>
                 </div>
 
                 <div className={styles.savingsCardCop}>

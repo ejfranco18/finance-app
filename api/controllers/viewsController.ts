@@ -1,6 +1,11 @@
 import type { Request, Response } from 'express';
-import { query, withTransaction } from '../lib/db';
+import {
+  query,
+  withTransaction,
+  applyDailyCompoundInterest,
+} from '../lib/db';
 import { refreshStaleSecurityPrices } from './investmentController';
+import { ensureProductionTelegramWebhook } from './telegramController';
 
 /**
  * GET /api/canvas/:month
@@ -54,6 +59,8 @@ export async function getNetWorthView(req: Request, res: Response) {
     if (!userId) {
       return res.status(400).json({ error: 'Usuario no identificado.' });
     }
+
+    await applyDailyCompoundInterest(userId);
 
     const result = await query(
       `SELECT * FROM v_net_worth WHERE user_id = $1`,
@@ -192,6 +199,12 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       return res.status(400).json({ error: 'Usuario no identificado.' });
     }
 
+    // Asegura en segundo plano que el Webhook 24/7 de Telegram apunte al dominio HTTPS de producción (Vercel)
+    void ensureProductionTelegramWebhook(userId, req);
+
+    // Asegura columnas y aplica el interés compuesto diario si ya pasó medianoche (Bogotá)
+    await applyDailyCompoundInterest(userId);
+
     // Actualizar precios de acciones (> 30 min) desde Yahoo Finance antes de leer v_portfolio_summary
     await refreshStaleSecurityPrices(userId);
 
@@ -211,7 +224,12 @@ export async function getCanvasDashboard(req: Request, res: Response) {
         [userId]
       ),
       query(
-        `SELECT id, name, type, currency, initial_balance, current_balance, is_active
+        `SELECT
+           id, name, type, currency, initial_balance, current_balance,
+           reconciled_balance, reconciled_at,
+           annual_interest_rate, accumulated_interest,
+           TO_CHAR(last_interest_date, 'YYYY-MM-DD') AS last_interest_date,
+           is_active
          FROM accounts
          WHERE user_id = $1 AND is_active = TRUE
          ORDER BY created_at ASC`,
