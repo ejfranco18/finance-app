@@ -7,6 +7,8 @@ import {
   PeriodConfigFormModal,
   AccountFormModal,
   StockHoldingFormModal,
+  InitialTransactionDraft,
+  EditablePatrimonyItem,
 } from './FinanceForms';
 import { AIAssistantModal } from './AIAssistantModal';
 import {
@@ -23,6 +25,10 @@ import {
   Trash2,
   Pencil,
   TrendingUp,
+  AlertTriangle,
+  CheckCircle2,
+  Sparkles,
+  X,
 } from 'lucide-react';
 import styles from './Canvas.module.css';
 
@@ -308,6 +314,74 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
+
+  const handleSaveReconciliation = async (
+    accountId: string,
+    bankBalanceValue: number | null | undefined,
+    annualInterestRateValue?: number,
+    initialBalanceValue?: number
+  ) => {
+    try {
+      setIsSavingReconcile(true);
+      setReconcileError(null);
+      setReconcileSavedMsg(null);
+      const token = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      if (effectiveUserId) {
+        headers['x-user-id'] = effectiveUserId;
+      }
+
+      const payload: Record<string, unknown> = {};
+      if (bankBalanceValue !== undefined) {
+        payload.reconciledBalance = bankBalanceValue;
+        payload.clear = bankBalanceValue === null;
+      }
+      if (annualInterestRateValue !== undefined) {
+        payload.annualInterestRate = annualInterestRateValue;
+      }
+      if (initialBalanceValue !== undefined) {
+        payload.initialBalance = initialBalanceValue;
+      }
+
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/reconcile`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || 'No se pudo actualizar la cuenta.');
+      }
+
+      if (bankBalanceValue === null) {
+        setReconcileInputValue('');
+        setReconcileSavedMsg('Validación manual limpiada.');
+      } else if (bankBalanceValue !== undefined) {
+        setReconcileInputValue(String(bankBalanceValue));
+        setReconcileSavedMsg('Saldo de banco guardado.');
+      } else if (initialBalanceValue !== undefined) {
+        setReconcileInitialInputValue(String(initialBalanceValue));
+        setReconcileSavedMsg('Saldo inicial actualizado y saldo de la cuenta recalculado.');
+      } else if (annualInterestRateValue !== undefined) {
+        setReconcileRateInputValue(String(annualInterestRateValue));
+        setReconcileSavedMsg('Tasa de interés anual (E.A.) actualizada.');
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+    } catch (err) {
+      setReconcileError(
+        err instanceof Error ? err.message : 'Error inesperado al actualizar la cuenta.'
+      );
+    } finally {
+      setIsSavingReconcile(false);
+    }
+  };
 
   const handleDeleteHolding = async (holdingId: string) => {
     try {
@@ -1576,7 +1650,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
             <span>+ Acción / ETF</span>
           </button>
 
-          <button onClick={() => setIsAssetModalOpen(true)} className={styles.secondaryCyanBtn}>
+          <button
+            onClick={() => {
+              setEditingPatrimonyItem(null);
+              setIsAssetModalOpen(true);
+            }}
+            className={styles.secondaryCyanBtn}
+          >
             <Building className={styles.btnIcon} />
             <span>+ Activo / Deuda</span>
           </button>
