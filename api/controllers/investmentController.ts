@@ -493,8 +493,9 @@ export async function refreshStaleSecurityPrices(userId: string): Promise<void> 
       );
     }
 
-    await Promise.allSettled(
-      staleResult.rows.map(async ({ ticker }) => {
+    await Promise.allSettled([
+      ...tasks,
+      ...staleSecuritiesRes.rows.map(async ({ ticker }) => {
         const quote = await fetchYahooMarketQuote(ticker);
         if (quote.price !== null && quote.price > 0) {
           await query(
@@ -505,8 +506,8 @@ export async function refreshStaleSecurityPrices(userId: string): Promise<void> 
             [quote.price, ticker]
           );
         }
-      })
-    );
+      }),
+    ]);
   } catch (error) {
     console.warn('Error al verificar caché de precios y TRM en Yahoo Finance:', error);
   }
