@@ -116,8 +116,13 @@ export async function getInvestmentsSummaryView(req: Request, res: Response) {
  * GET /api/db-overview
  * Endpoint de diagnóstico para inspeccionar todas las tablas y vistas en DBTest.tsx.
  */
-export async function getDatabaseOverview(_req: Request, res: Response) {
+export async function getDatabaseOverview(req: Request, res: Response) {
   try {
+    const userId = req.user?.uid;
+    if (!userId) {
+      return res.status(401).json({ error: 'Usuario no autenticado.' });
+    }
+
     const data = await withTransaction(async (client) => {
       const [
         users,
@@ -134,21 +139,41 @@ export async function getDatabaseOverview(_req: Request, res: Response) {
         vNetWorth,
         vPortfolioSummary,
       ] = await Promise.all([
-        client.query(`SELECT * FROM users ORDER BY created_at DESC`),
+        client.query(`SELECT * FROM users WHERE id = $1 ORDER BY created_at DESC`, [userId]),
         client.query(
-          `SELECT user_id, main_currency, exchange_rate_cop_usd, ai_provider, updated_at FROM user_settings`
+          `SELECT user_id, main_currency, exchange_rate_cop_usd, ai_provider, updated_at FROM user_settings WHERE user_id = $1`,
+          [userId]
         ),
-        client.query(`SELECT * FROM categories ORDER BY type, category_name, sub_category_name`),
-        client.query(`SELECT * FROM accounts ORDER BY created_at ASC`),
-        client.query(`SELECT * FROM transactions ORDER BY date DESC, created_at DESC`),
-        client.query(`SELECT * FROM assets ORDER BY created_at ASC`),
-        client.query(`SELECT * FROM liabilities ORDER BY created_at ASC`),
-        client.query(`SELECT * FROM liability_payments ORDER BY date DESC`),
+        client.query(
+          `SELECT * FROM categories WHERE user_id = $1 ORDER BY type, category_name, sub_category_name`,
+          [userId]
+        ),
+        client.query(`SELECT * FROM accounts WHERE user_id = $1 ORDER BY created_at ASC`, [
+          userId,
+        ]),
+        client.query(
+          `SELECT * FROM transactions WHERE user_id = $1 ORDER BY date DESC, created_at DESC`,
+          [userId]
+        ),
+        client.query(`SELECT * FROM assets WHERE user_id = $1 ORDER BY created_at ASC`, [userId]),
+        client.query(`SELECT * FROM liabilities WHERE user_id = $1 ORDER BY created_at ASC`, [
+          userId,
+        ]),
+        client.query(
+          `SELECT * FROM liability_payments WHERE user_id = $1 ORDER BY date DESC`,
+          [userId]
+        ),
         client.query(`SELECT * FROM securities ORDER BY ticker ASC`),
-        client.query(`SELECT * FROM portfolio_holdings ORDER BY ticker ASC`),
-        client.query(`SELECT * FROM v_monthly_canvas ORDER BY month DESC`),
-        client.query(`SELECT * FROM v_net_worth`),
-        client.query(`SELECT * FROM v_portfolio_summary ORDER BY ticker ASC`),
+        client.query(`SELECT * FROM portfolio_holdings WHERE user_id = $1 ORDER BY ticker ASC`, [
+          userId,
+        ]),
+        client.query(`SELECT * FROM v_monthly_canvas WHERE user_id = $1 ORDER BY month DESC`, [
+          userId,
+        ]),
+        client.query(`SELECT * FROM v_net_worth WHERE user_id = $1`, [userId]),
+        client.query(`SELECT * FROM v_portfolio_summary WHERE user_id = $1 ORDER BY ticker ASC`, [
+          userId,
+        ]),
       ]);
 
       return {
@@ -216,6 +241,8 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       portfolioRes,
       taxonomyRes,
       transactionsRes,
+      assetsRes,
+      liabilitiesRes,
     ] = await Promise.all([
       query(
         `SELECT main_currency, exchange_rate_cop_usd, ai_provider
@@ -277,7 +304,19 @@ export async function getCanvasDashboard(req: Request, res: Response) {
              t.category_name,
              t.category_type,
              COALESCE(t.sub_category_name, 'General') AS sub_category_name,
-             SUM(t.amount) AS total_amount,
+             SUM(
+               CASE
+                 WHEN t.currency = 'USD' THEN
+                   ROUND(
+                     t.amount * COALESCE(
+                       (SELECT exchange_rate_cop_usd FROM user_settings WHERE user_id = $1 LIMIT 1),
+                       3303.16
+                     ),
+                     2
+                   )
+                 ELSE t.amount
+               END
+             ) AS total_amount,
              COUNT(*)::int AS transactions_count
            FROM transactions t
            WHERE t.user_id = $1
@@ -325,6 +364,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
            TO_CHAR(t.date, 'YYYY-MM') AS month,
            COALESCE(t.description, '') AS description,
            t.amount,
+           t.destination_amount,
            t.currency,
            t.category_type,
            t.category_name,
@@ -339,6 +379,20 @@ export async function getCanvasDashboard(req: Request, res: Response) {
          LEFT JOIN accounts da ON t.destination_account_id = da.id
          WHERE t.user_id = $1
          ORDER BY t.date DESC, t.created_at DESC`,
+        [userId]
+      ),
+      query(
+        `SELECT id, name, type, estimated_value, currency, updated_at
+         FROM assets
+         WHERE user_id = $1
+         ORDER BY created_at ASC`,
+        [userId]
+      ),
+      query(
+        `SELECT id, name, type, original_amount, current_balance, interest_rate, currency, updated_at
+         FROM liabilities
+         WHERE user_id = $1
+         ORDER BY created_at ASC`,
         [userId]
       ),
     ]);
@@ -365,12 +419,16 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       portfolio: portfolioRes.rows,
       taxonomy: taxonomyRes.rows,
       transactions: transactionsRes.rows,
+      assets: assetsRes.rows,
+      liabilities: liabilitiesRes.rows,
     });
   } catch (error) {
     console.error('Error al obtener datos del Canvas Dashboard:', error);
     return res.status(500).json({ error: 'Error interno al consultar los datos del Canvas.' });
   }
 }
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * POST /api/patrimony
@@ -386,6 +444,7 @@ export async function createPatrimonyRecord(req: Request, res: Response) {
       institucion,
       moneda,
       valorMonto,
+      montoOriginal,
       tasaRendimientoOInteres,
     } = req.body || {};
 
@@ -398,12 +457,15 @@ export async function createPatrimonyRecord(req: Request, res: Response) {
       });
     }
 
+    const cleanName = String(nombreInstrumento).trim();
+    const cleanType = String(institucion).trim();
+
     if (tipoClasificacion === 'activo_liquido') {
       const accRes = await query<{ id: string }>(
         `INSERT INTO accounts (user_id, name, type, currency, initial_balance, current_balance, is_active)
          VALUES ($1, $2, $3, $4, $5, $5, TRUE)
          RETURNING id`,
-        [userId, String(nombreInstrumento).trim(), String(institucion).trim(), currency, amount]
+        [userId, cleanName, cleanType, currency, amount]
       );
       return res.status(201).json({
         success: true,
@@ -416,18 +478,18 @@ export async function createPatrimonyRecord(req: Request, res: Response) {
       const rate = Number.isFinite(Number(tasaRendimientoOInteres))
         ? Number(tasaRendimientoOInteres)
         : 0;
+      const origAmount =
+        montoOriginal !== undefined &&
+        montoOriginal !== null &&
+        Number.isFinite(Number(montoOriginal)) &&
+        Number(montoOriginal) > 0
+          ? Number(montoOriginal)
+          : amount;
       const liaRes = await query<{ id: string }>(
         `INSERT INTO liabilities (user_id, name, type, original_amount, current_balance, interest_rate, currency)
-         VALUES ($1, $2, $3, $4, $4, $5, $6)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id`,
-        [
-          userId,
-          `${String(nombreInstrumento).trim()} (${String(institucion).trim()})`,
-          String(institucion).trim(),
-          amount,
-          rate,
-          currency,
-        ]
+        [userId, cleanName, cleanType, origAmount, amount, rate, currency]
       );
       return res.status(201).json({
         success: true,
@@ -441,13 +503,7 @@ export async function createPatrimonyRecord(req: Request, res: Response) {
       `INSERT INTO assets (user_id, name, type, estimated_value, currency)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [
-        userId,
-        `${String(nombreInstrumento).trim()} (${String(institucion).trim()})`,
-        String(institucion).trim(),
-        amount,
-        currency,
-      ]
+      [userId, cleanName, cleanType, amount, currency]
     );
 
     return res.status(201).json({
@@ -458,6 +514,145 @@ export async function createPatrimonyRecord(req: Request, res: Response) {
   } catch (error) {
     console.error('Error al registrar activo o pasivo:', error);
     return res.status(500).json({ error: 'Error interno al guardar el registro patrimonial.' });
+  }
+}
+
+/**
+ * PUT /api/patrimony/:id
+ * Actualiza un Activo Fijo/Inversión (`assets`) o un Pasivo/Deuda (`liabilities`) existente.
+ */
+export async function updatePatrimonyRecord(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || String(req.body?.userId || '');
+    const recordId = String(req.params.id || '').trim();
+    const {
+      tipoClasificacion,
+      nombreInstrumento,
+      institucion,
+      moneda,
+      valorMonto,
+      montoOriginal,
+      tasaRendimientoOInteres,
+    } = req.body || {};
+
+    if (!userId || !UUID_REGEX.test(recordId)) {
+      return res.status(400).json({ error: 'Identificador de registro patrimonial inválido.' });
+    }
+
+    const amount = Number(valorMonto);
+    const currency = moneda === 'USD' ? 'USD' : 'COP';
+    const cleanName = String(nombreInstrumento || '').trim();
+    const cleanType = String(institucion || '').trim();
+
+    if (!cleanName || cleanName.length < 2 || !cleanType || !Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({
+        error: 'Datos inválidos. Verifica nombre, tipo/entidad y un valor mayor o igual a 0.',
+      });
+    }
+
+    if (tipoClasificacion === 'pasivo_deuda') {
+      const rate = Number.isFinite(Number(tasaRendimientoOInteres))
+        ? Number(tasaRendimientoOInteres)
+        : 0;
+      const origAmount =
+        montoOriginal !== undefined &&
+        montoOriginal !== null &&
+        montoOriginal !== '' &&
+        Number.isFinite(Number(montoOriginal)) &&
+        Number(montoOriginal) > 0
+          ? Number(montoOriginal)
+          : null;
+
+      const updateLia = await query<{ id: string }>(
+        `UPDATE liabilities
+         SET name = $3,
+             type = $4,
+             current_balance = $5,
+             original_amount = COALESCE($6, original_amount),
+             interest_rate = $7,
+             currency = $8,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1::uuid AND user_id = $2
+         RETURNING id`,
+        [recordId, userId, cleanName, cleanType, amount, origAmount, rate, currency]
+      );
+
+      if (updateLia.rowCount === 0) {
+        return res.status(404).json({ error: 'Pasivo no encontrado para el usuario.' });
+      }
+
+      return res.status(200).json({
+        success: true,
+        table: 'liabilities',
+        id: updateLia.rows[0].id,
+      });
+    }
+
+    const updateAsset = await query<{ id: string }>(
+      `UPDATE assets
+       SET name = $3,
+           type = $4,
+           estimated_value = $5,
+           currency = $6,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1::uuid AND user_id = $2
+       RETURNING id`,
+      [recordId, userId, cleanName, cleanType, amount, currency]
+    );
+
+    if (updateAsset.rowCount === 0) {
+      return res.status(404).json({ error: 'Activo no encontrado para el usuario.' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      table: 'assets',
+      id: updateAsset.rows[0].id,
+    });
+  } catch (error) {
+    console.error('Error al actualizar activo o pasivo:', error);
+    return res.status(500).json({ error: 'Error interno al actualizar el registro patrimonial.' });
+  }
+}
+
+/**
+ * DELETE /api/patrimony/:id
+ * Elimina un Activo Fijo (`assets`) o un Pasivo (`liabilities`) perteneciente al usuario.
+ */
+export async function deletePatrimonyRecord(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || String(req.body?.userId || req.query.userId || '');
+    const recordId = String(req.params.id || '').trim();
+    const tipoClasificacion = String(
+      req.query.tipoClasificacion || req.body?.tipoClasificacion || ''
+    ).trim();
+
+    if (!userId || !UUID_REGEX.test(recordId)) {
+      return res.status(400).json({ error: 'Identificador de registro patrimonial inválido.' });
+    }
+
+    if (tipoClasificacion === 'pasivo_deuda') {
+      const delLia = await query(
+        `DELETE FROM liabilities WHERE id = $1::uuid AND user_id = $2`,
+        [recordId, userId]
+      );
+      if (delLia.rowCount === 0) {
+        return res.status(404).json({ error: 'Pasivo no encontrado para el usuario.' });
+      }
+      return res.status(200).json({ success: true, table: 'liabilities', id: recordId });
+    }
+
+    const delAsset = await query(
+      `DELETE FROM assets WHERE id = $1::uuid AND user_id = $2`,
+      [recordId, userId]
+    );
+    if (delAsset.rowCount === 0) {
+      return res.status(404).json({ error: 'Activo no encontrado para el usuario.' });
+    }
+    return res.status(200).json({ success: true, table: 'assets', id: recordId });
+  } catch (error) {
+    console.error('Error al eliminar activo o pasivo:', error);
+    return res.status(500).json({ error: 'Error interno al eliminar el registro patrimonial.' });
   }
 }
 

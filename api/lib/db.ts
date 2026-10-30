@@ -117,6 +117,11 @@ export function ensureAccountReconciliationColumns(): Promise<void> {
          ADD COLUMN IF NOT EXISTS last_interest_date DATE DEFAULT NULL`
       );
 
+      await query(
+        `ALTER TABLE transactions
+         ADD COLUMN IF NOT EXISTS destination_amount NUMERIC(15, 2) DEFAULT NULL`
+      );
+
       // Inicializar 9.35% E.A. en las 3 cuentas de Nu si aún no tienen fecha de inicio de interés
       await query(
         `UPDATE accounts

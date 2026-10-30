@@ -140,6 +140,7 @@ interface TransactionRecord {
   month: string;
   description: string;
   amount: string;
+  destination_amount?: string | null;
   currency: string;
   category_type: string;
   category_name: string;
@@ -149,6 +150,26 @@ interface TransactionRecord {
   destination_account_id: string | null;
   destination_account_name: string | null;
   is_recurring?: boolean;
+}
+
+interface AssetRecord {
+  id: string;
+  name: string;
+  type: string;
+  estimated_value: string;
+  currency: string;
+  updated_at?: string;
+}
+
+interface LiabilityRecord {
+  id: string;
+  name: string;
+  type: string;
+  original_amount: string;
+  current_balance: string;
+  interest_rate: string;
+  currency: string;
+  updated_at?: string;
 }
 
 interface CanvasDashboardResponse {
@@ -163,6 +184,8 @@ interface CanvasDashboardResponse {
   portfolio: PortfolioRecord[];
   taxonomy: TaxonomyRecord[];
   transactions: TransactionRecord[];
+  assets?: AssetRecord[];
+  liabilities?: LiabilityRecord[];
 }
 
 const CATEGORY_COLORS = [
@@ -255,6 +278,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<TransactionRecord | null>(null);
   const [txInitialDraft, setTxInitialDraft] = useState<InitialTransactionDraft | null>(null);
+  const [isPortfolioExpanded, setIsPortfolioExpanded] = useState<boolean>(true);
 
   // Conciliación de Cuentas (Saldo Calculado vs. Saldo Real en Banco + Saldo Inicial + Tasa de Interés E.A.)
   const [reconcilingAccountId, setReconcilingAccountId] = useState<string | null>(null);
@@ -265,6 +289,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [isSavingReconcile, setIsSavingReconcile] = useState<boolean>(false);
   const [reconcileError, setReconcileError] = useState<string | null>(null);
   const [reconcileSavedMsg, setReconcileSavedMsg] = useState<string | null>(null);
+  const [payTcOriginAccountId, setPayTcOriginAccountId] = useState<string>('');
+  const [isPayingTc, setIsPayingTc] = useState<boolean>(false);
 
   // Stock Holdings (Lotes de Acciones) state
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
@@ -276,6 +302,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
+  const [editingPatrimonyItem, setEditingPatrimonyItem] =
+    useState<EditablePatrimonyItem | null>(null);
   const [isPeriodModalOpen, setIsPeriodModalOpen] = useState(false);
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
 
@@ -312,6 +340,112 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       );
     } finally {
       setDeletingHoldingId(null);
+    }
+  };
+
+  const handlePayCreditCardToZero = async (
+    tcAccount: AccountRecord,
+    originAccountId: string,
+    exchangeRateTrm: number
+  ) => {
+    const currentBal = Number(tcAccount.current_balance || 0);
+    const debtAmount = Number(Math.abs(currentBal).toFixed(2));
+    if (debtAmount <= 0) {
+      setReconcileError('La tarjeta de crédito ya se encuentra en $0.');
+      return;
+    }
+    if (!originAccountId || originAccountId === tcAccount.id) {
+      setReconcileError('Selecciona una cuenta de origen válida para realizar el pago.');
+      return;
+    }
+
+    const originAcc = (data?.accounts || []).find((a) => a.id === originAccountId);
+    if (!originAcc) {
+      setReconcileError('No se encontró la cuenta de origen seleccionada.');
+      return;
+    }
+
+    try {
+      setIsPayingTc(true);
+      setReconcileError(null);
+      setReconcileSavedMsg(null);
+
+      const token = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      if (effectiveUserId) {
+        headers['x-user-id'] = effectiveUserId;
+      }
+
+      const isCrossCurrency = originAcc.currency !== tcAccount.currency;
+      let txAmount = debtAmount;
+      let txDestAmount: number | undefined = undefined;
+
+      if (isCrossCurrency) {
+        const safeTrm = exchangeRateTrm > 0 ? exchangeRateTrm : 3303.16;
+        if (originAcc.currency === 'COP' && tcAccount.currency === 'USD') {
+          txAmount = Number((debtAmount * safeTrm).toFixed(2));
+          txDestAmount = debtAmount;
+        } else if (originAcc.currency === 'USD' && tcAccount.currency === 'COP') {
+          txAmount = Number((debtAmount / safeTrm).toFixed(2));
+          txDestAmount = debtAmount;
+        }
+      }
+
+      const payload: Record<string, unknown> = {
+        accountId: originAcc.id,
+        destinationAccountId: tcAccount.id,
+        date: new Date().toISOString().split('T')[0],
+        amount: txAmount,
+        ...(txDestAmount !== undefined ? { destinationAmount: txDestAmount } : {}),
+        currency: originAcc.currency === 'USD' ? 'USD' : 'COP',
+        categoryType: 'TRANSFERENCIA',
+        categoryName: 'Transferencia',
+        subCategoryName: 'Pago Tarjeta de Crédito',
+        description: `Pago total ${tcAccount.name} desde ${originAcc.name}`,
+        isRecurring: false,
+      };
+
+      const res = await fetch('/api/transactions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || 'No se pudo registrar el pago de la tarjeta de crédito.');
+      }
+
+      if (
+        tcAccount.reconciled_balance !== null &&
+        tcAccount.reconciled_balance !== undefined &&
+        tcAccount.reconciled_balance !== ''
+      ) {
+        await fetch(`/api/accounts/${encodeURIComponent(tcAccount.id)}/reconcile`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ reconciledBalance: 0, clear: false }),
+        }).catch(() => undefined);
+        setReconcileInputValue('0');
+      }
+
+      setReconcileSavedMsg(
+        `Pago total registrado desde ${originAcc.name}. ${tcAccount.name} quedó en $0.`
+      );
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+    } catch (err) {
+      setReconcileError(
+        err instanceof Error
+          ? err.message
+          : 'Error inesperado al pagar la tarjeta de crédito.'
+      );
+    } finally {
+      setIsPayingTc(false);
     }
   };
 
@@ -380,6 +514,28 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const portfolio = data?.portfolio || [];
   const taxonomyRows = data?.taxonomy || [];
   const allTransactions = data?.transactions || [];
+  const assetsList = data?.assets || [];
+  const liabilitiesList = data?.liabilities || [];
+
+  const editableAssets: EditablePatrimonyItem[] = assetsList.map((a) => ({
+    id: a.id,
+    tipoClasificacion: 'activo_fijo_inversion',
+    name: a.name,
+    type: a.type,
+    currency: a.currency === 'USD' ? 'USD' : 'COP',
+    amount: Number(a.estimated_value || 0),
+  }));
+
+  const editableLiabilities: EditablePatrimonyItem[] = liabilitiesList.map((l) => ({
+    id: l.id,
+    tipoClasificacion: 'pasivo_deuda',
+    name: l.name,
+    type: l.type,
+    currency: l.currency === 'USD' ? 'USD' : 'COP',
+    amount: Number(l.current_balance || 0),
+    originalAmount: Number(l.original_amount || 0),
+    interestRate: Number(l.interest_rate || 0),
+  }));
 
   const periodLabel =
     selectedPeriod === 'ALL' ? 'Todo el Año (2026)' : formatMonthLabel(selectedPeriod);
@@ -411,21 +567,56 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const usdAccounts = accounts.filter(
     (acc) => acc.currency === 'USD' && !isCreditCardType(acc.type)
   );
+  const usdLiquidAccounts = usdAccounts.filter(
+    (acc) =>
+      !['ahorro', 'inversión', 'inversion', 'broker'].includes(acc.type.toLowerCase())
+  );
+  const usdSavingsAccounts = usdAccounts.filter(
+    (acc) => acc.type.toLowerCase() === 'ahorro'
+  );
+  const usdDisplayAccounts = usdAccounts.filter(
+    (acc) => acc.type.toLowerCase() !== 'broker' || Number(acc.current_balance || 0) !== 0
+  );
 
   const totalImmediateLiquidityCop = copLiquidAccounts.reduce(
     (sum, acc) => sum + Number(acc.current_balance || 0),
     0
   );
+  const totalImmediateLiquidityUsd = usdLiquidAccounts.reduce(
+    (sum, acc) => sum + Number(acc.current_balance || 0),
+    0
+  );
+  const totalImmediateLiquidityConsolidatedCop =
+    totalImmediateLiquidityCop + totalImmediateLiquidityUsd * trm;
+
+  // Desglose de Gastos por Moneda (COP vs USD) en el período seleccionado
+  const periodTransactions =
+    selectedPeriod === 'ALL'
+      ? allTransactions
+      : allTransactions.filter((tx) => tx.month === selectedPeriod);
+  const periodExpenseTx = periodTransactions.filter((tx) => tx.category_type === 'GASTO');
+  const expensesCopTx = periodExpenseTx.filter((tx) => tx.currency !== 'USD');
+  const expensesUsdTx = periodExpenseTx.filter((tx) => tx.currency === 'USD');
+
+  const totalExpensesCopOnly = expensesCopTx.reduce(
+    (sum, tx) => sum + Number(tx.amount || 0),
+    0
+  );
+  const totalExpensesUsdOnly = expensesUsdTx.reduce(
+    (sum, tx) => sum + Number(tx.amount || 0),
+    0
+  );
+  const totalExpensesUsdInCop = totalExpensesUsdOnly * trm;
 
   // 2. Consolidado de Flujo Mensual / Anual (v_monthly_canvas filtrado por selectedPeriod)
   const totalIncomeYear = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_income || 0),
     0
   );
-  const totalExpensesYear = filteredMonthlyRows.reduce(
-    (sum, row) => sum + Number(row.total_expenses || 0),
-    0
-  );
+  const totalExpensesYear =
+    totalExpensesCopOnly + totalExpensesUsdInCop > 0
+      ? totalExpensesCopOnly + totalExpensesUsdInCop
+      : filteredMonthlyRows.reduce((sum, row) => sum + Number(row.total_expenses || 0), 0);
   const totalSavingsTransferred = filteredMonthlyRows.reduce(
     (sum, row) => sum + Number(row.total_savings || 0),
     0
@@ -580,9 +771,6 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     usdAccounts.length > 0 ? usdAccounts.map((a) => a.name).join(', ') : 'Sin cuentas USD';
 
   const discrepantAccounts = accounts.filter((acc) => getAccountReconciliation(acc).isDiscrepant);
-  const discrepantUsdAccounts = usdAccounts.filter(
-    (acc) => getAccountReconciliation(acc).isDiscrepant
-  );
 
   const openAccountReconciliation = (accountId: string) => {
     const acc = accounts.find((a) => a.id === accountId) || accounts[0];
@@ -595,6 +783,19 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     setReconcileInputValue(hasReconciled ? String(Number(acc.reconciled_balance)) : '');
     setReconcileInitialInputValue(String(Number(acc.initial_balance || 0)));
     setReconcileRateInputValue(String(Number(acc.annual_interest_rate || 0)));
+    const defaultOrigin =
+      accounts.find(
+        (a) =>
+          a.id !== acc.id &&
+          !isCreditCardType(a.type) &&
+          a.currency === acc.currency &&
+          !isSavingsAccount(a)
+      ) ||
+      accounts.find((a) => a.id !== acc.id && !isCreditCardType(a.type)) ||
+      accounts.find((a) => a.id !== acc.id);
+    if (defaultOrigin) {
+      setPayTcOriginAccountId(defaultOrigin.id);
+    }
     setReconcileError(null);
     setReconcileSavedMsg(null);
     setReconcileSearchQuery('');
@@ -642,7 +843,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
       />
       <AssetLiabilityFormModal
         isOpen={isAssetModalOpen}
-        onClose={() => setIsAssetModalOpen(false)}
+        onClose={() => {
+          setIsAssetModalOpen(false);
+          setEditingPatrimonyItem(null);
+        }}
+        editingItem={editingPatrimonyItem}
+        existingAssets={editableAssets}
+        existingLiabilities={editableLiabilities}
       />
       <StockHoldingFormModal
         isOpen={isStockModalOpen}
@@ -699,6 +906,16 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
             : null;
         const liveIsDiscrepant = liveDiff !== null && Math.abs(liveDiff) >= 0.01;
         const liveIsMatched = liveDiff !== null && Math.abs(liveDiff) < 0.01;
+        const isTcAccount = isCreditCardType(reconcilingAccount.type);
+        const tcDebtAmount = Number(Math.abs(calcBal).toFixed(2));
+        const paymentOriginCandidates = accounts.filter(
+          (a) => a.id !== reconcilingAccount.id && !isCreditCardType(a.type)
+        );
+        const effectivePayOriginId = paymentOriginCandidates.some(
+          (a) => a.id === payTcOriginAccountId
+        )
+          ? payTcOriginAccountId
+          : paymentOriginCandidates[0]?.id || '';
 
         return (
           <div className={styles.reconcileOverlay}>
@@ -763,6 +980,104 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
               {reconcileError && (
                 <div className={styles.errorCard}>
                   <span>{reconcileError}</span>
+                </div>
+              )}
+
+              {/* CTA de Pago Total para Tarjetas de Crédito */}
+              {isTcAccount && (
+                <div className={styles.tcPaymentBanner}>
+                  <div>
+                    <div className={styles.taxonomyTitle} style={{ fontSize: '14px' }}>
+                      💳 Pago de Tarjeta de Crédito ·{' '}
+                      {calcBal < 0 ? (
+                        <span className={styles.monoRose}>
+                          Deuda actual: {fmtAcc(tcDebtAmount)}
+                        </span>
+                      ) : (
+                        <span className={styles.monoEmerald}>Al día ($0 deuda)</span>
+                      )}
+                    </div>
+                    <p className={styles.taxonomySubtitle} style={{ marginTop: '2px' }}>
+                      Selecciona la cuenta desde la que deseas pagar para transferir el saldo y
+                      dejar {reconcilingAccount.name} en 0.
+                    </p>
+                    {reconcileSavedMsg && (
+                      <div
+                        className={styles.monoEmerald}
+                        style={{ fontSize: '12px', marginTop: '4px', fontWeight: 600 }}
+                      >
+                        ✓ {reconcileSavedMsg}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={styles.tcPaymentControls}>
+                    <label
+                      htmlFor="tc-pay-origin-select"
+                      className={styles.cardHintSlate}
+                      style={{ margin: 0, fontWeight: 600 }}
+                    >
+                      Pagar desde:
+                    </label>
+                    <select
+                      id="tc-pay-origin-select"
+                      value={effectivePayOriginId}
+                      onChange={(e) => setPayTcOriginAccountId(e.target.value)}
+                      className={styles.tcPaymentSelect}
+                    >
+                      {paymentOriginCandidates.map((acc) => {
+                        const fmtOrigin =
+                          acc.currency === 'USD' ? formatCurrencyUSD : formatCurrencyCOP;
+                        return (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.name} ({acc.currency}) · Disp:{' '}
+                            {fmtOrigin(Number(acc.current_balance || 0))}
+                          </option>
+                        );
+                      })}
+                    </select>
+
+                    <button
+                      type="button"
+                      disabled={isPayingTc || calcBal >= 0 || !effectivePayOriginId}
+                      onClick={() =>
+                        handlePayCreditCardToZero(
+                          reconcilingAccount,
+                          effectivePayOriginId,
+                          trm
+                        )
+                      }
+                      className={styles.reconcileSaveBtn}
+                    >
+                      {isPayingTc
+                        ? 'Procesando pago...'
+                        : calcBal < 0
+                          ? `Pagar Total (${fmtAcc(tcDebtAmount)}) y dejar en 0`
+                          : 'Tarjeta en $0'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const originAcc = accounts.find((a) => a.id === effectivePayOriginId);
+                        setEditingTransaction(null);
+                        setTxInitialDraft({
+                          tipo: 'transferencia',
+                          monto: tcDebtAmount > 0 ? tcDebtAmount : undefined,
+                          moneda: originAcc?.currency === 'USD' ? 'USD' : 'COP',
+                          cuentaOrigenId: effectivePayOriginId,
+                          cuentaDestinoId: reconcilingAccount.id,
+                          categoriaMacroId: 'Transferencia',
+                          subcategoria: 'Pago Tarjeta de Crédito',
+                          descripcion: `Pago ${reconcilingAccount.name}`,
+                        });
+                        setIsTxModalOpen(true);
+                      }}
+                      className={styles.reconcileSecondaryBtn}
+                    >
+                      Otro monto / Fecha
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1091,19 +1406,33 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     </thead>
                     <tbody className={styles.tableBody}>
                       {reconcilingAccountTransactions.map((tx) => {
-                        const txAmount = Number(tx.amount || 0);
+                        const isDestInflow =
+                          tx.destination_account_id === reconcilingAccount.id &&
+                          (tx.category_type === 'TRANSFERENCIA' ||
+                            tx.category_type === 'AHORRO' ||
+                            tx.category_type === 'INVERSION');
+                        const hasCustomDestAmount =
+                          isDestInflow &&
+                          tx.destination_amount !== null &&
+                          tx.destination_amount !== undefined &&
+                          tx.destination_amount !== '';
+                        const txAmount = hasCustomDestAmount
+                          ? Number(tx.destination_amount || 0)
+                          : Number(tx.amount || 0);
                         const isPositiveForThisAccount =
                           (tx.account_id === reconcilingAccount.id &&
                             (tx.category_type === 'INGRESO_FIJO' ||
                               tx.category_type === 'INGRESO_VARIABLE')) ||
-                          (tx.destination_account_id === reconcilingAccount.id &&
-                            (tx.category_type === 'TRANSFERENCIA' ||
-                              tx.category_type === 'AHORRO' ||
-                              tx.category_type === 'INVERSION'));
+                          isDestInflow;
                         const isConfirming = confirmDeleteTxId === tx.id;
                         const isDeleting = deletingTxId === tx.id;
-                        const fmtTx =
-                          tx.currency === 'USD' ? formatCurrencyUSD : formatCurrencyCOP;
+                        const fmtTx = isDestInflow
+                          ? reconcilingAccount.currency === 'USD'
+                            ? formatCurrencyUSD
+                            : formatCurrencyCOP
+                          : tx.currency === 'USD'
+                            ? formatCurrencyUSD
+                            : formatCurrencyCOP;
 
                         return (
                           <tr key={tx.id} className={styles.tr}>
@@ -1353,10 +1682,56 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                   </div>
 
                   <div className={styles.heroBalanceBlock}>
-                    <span className={styles.heroBalanceLabel}>Saldo Disponible al Instante</span>
+                    <span className={styles.heroBalanceLabel}>Saldo Disponible al Instante (COP)</span>
                     <div className={styles.heroBalanceValue}>
                       <span className={styles.heroCurrencySymbol}>$</span>
                       <span>{formatNumberCOP(totalImmediateLiquidityCop)}</span>
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        fontSize: '0.88rem',
+                        color: '#fbbf24',
+                        fontWeight: 600,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <span>Disponible en USD: {formatCurrencyUSD(totalImmediateLiquidityUsd)}</span>
+                      <span
+                        style={{
+                          fontSize: '0.76rem',
+                          color: '#94a3b8',
+                          fontWeight: 400,
+                        }}
+                      >
+                        (≈ {formatCurrencyCOP(totalImmediateLiquidityUsd * trm)} COP
+                        {usdLiquidAccounts.length > 0
+                          ? ` · ${usdLiquidAccounts.map((a) => a.name).join(' · ')}`
+                          : ''}
+                        )
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        paddingTop: '6px',
+                        borderTop: '1px solid rgba(51, 65, 85, 0.55)',
+                        fontSize: '0.84rem',
+                        color: '#67e8f9',
+                        fontWeight: 700,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <span>
+                        Sumatoria Disponible (COP + USD):{' '}
+                        {formatCurrencyCOP(totalImmediateLiquidityConsolidatedCop)}
+                      </span>
                     </div>
                   </div>
 
@@ -1529,36 +1904,66 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     );
                   })}
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const targetUsd =
-                        discrepantUsdAccounts[0]?.id ||
-                        usdAccounts[0]?.id ||
-                        accounts[0]?.id;
-                      if (targetUsd) openAccountReconciliation(targetUsd);
-                    }}
-                    className={
-                      discrepantUsdAccounts.length > 0
-                        ? styles.subAccountCardDiscrepancy
-                        : styles.subAccountCardInteractive
-                    }
-                    title="Haz clic para conciliar tus cuentas en USD"
-                  >
-                    <div>
-                      <div className={styles.subAccountTopRow}>
-                        <span className={styles.subAccountLabel}>Cuentas USD / Broker</span>
-                        {discrepantUsdAccounts.length > 0 && (
-                          <span className={styles.reconcileStatusBadgeRed}>⚠️ Descuadre</span>
+                  {usdLiquidAccounts.map((acc) => {
+                    const rec = getAccountReconciliation(acc);
+                    const cardClass = rec.isDiscrepant
+                      ? styles.subAccountCardDiscrepancy
+                      : rec.isMatched
+                        ? styles.subAccountCardMatched
+                        : styles.subAccountCardInteractive;
+
+                    return (
+                      <button
+                        key={acc.id}
+                        type="button"
+                        onClick={() => openAccountReconciliation(acc.id)}
+                        className={cardClass}
+                        title={`Haz clic para ver detalle y conciliar ${acc.name} (USD)`}
+                      >
+                        <div>
+                          <div className={styles.subAccountTopRow}>
+                            <span className={styles.subAccountLabel}>{acc.name}</span>
+                            {rec.isDiscrepant && (
+                              <span className={styles.reconcileStatusBadgeRed}>⚠️ Descuadre</span>
+                            )}
+                            {rec.isMatched && (
+                              <span className={styles.reconcileStatusBadgeGreen}>✓ Cuadrado</span>
+                            )}
+                          </div>
+                          <div className={styles.subAccountTitle}>
+                            {acc.type} · Disponible USD
+                            {rec.annualRate > 0 ? ` · ${rec.annualRate}% E.A.` : ''}
+                          </div>
+                          <div
+                            className={
+                              rec.isDiscrepant
+                                ? styles.subAccountAmountRose
+                                : styles.subAccountAmountAmber
+                            }
+                          >
+                            {formatCurrencyUSD(Number(acc.current_balance || 0))}
+                          </div>
+                        </div>
+                        {rec.isDiscrepant && rec.bankBalance !== null && rec.diff !== null ? (
+                          <div>
+                            <div className={styles.reconcileBankLineMuted}>
+                              Banco: {formatCurrencyUSD(rec.bankBalance)}
+                            </div>
+                            <div className={styles.reconcileDiffLineRed}>
+                              Dif: {rec.diff > 0 ? '+' : '-'}
+                              {formatCurrencyUSD(Math.abs(rec.diff))}
+                            </div>
+                          </div>
+                        ) : rec.isMatched ? (
+                          <div className={styles.reconcileBankLineMuted}>
+                            Igual al banco · Ver detalle →
+                          </div>
+                        ) : (
+                          <div className={styles.reconcileHintLink}>Validar cuenta USD →</div>
                         )}
-                      </div>
-                      <div className={styles.subAccountTitle}>{usdAccountNamesLabel}</div>
-                      <div className={styles.subAccountAmountAmber}>
-                        {formatCurrencyUSD(totalUsdAccountsBalance)}
-                      </div>
-                    </div>
-                    <div className={styles.reconcileHintLink}>Validar cuentas USD →</div>
-                  </button>
+                      </button>
+                    );
+                  })}
 
                   <div className={styles.subAccountCard}>
                     <div className={styles.subAccountLabel}>Disponibilidad</div>
@@ -1608,7 +2013,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                   <div className={styles.kpiValueWhite}>
                     {formatCurrencyCOP(totalExpensesYear)}
                   </div>
-                  <div className={styles.kpiMetaMuted}>Salidas operativas registradas</div>
+                  <div className={styles.kpiMetaMuted}>
+                    COP: {formatCompactMillionsCOP(totalExpensesCopOnly)} · USD:{' '}
+                    {formatCurrencyUSD(totalExpensesUsdOnly)}
+                  </div>
                 </div>
 
                 {/* Balance Neto */}
@@ -1659,6 +2067,49 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     <span className={styles.monoRose}>
                       Deuda: {formatCompactMillionsCOP(totalLiabilities)}
                     </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Cards de Distinción de Gastos por Moneda: Gastos en COP, Gastos en USD y Gastos Totales */}
+              <div className={styles.usdGrid3} style={{ marginTop: '0.85rem' }}>
+                <div className={styles.savingsCardCop}>
+                  <span className={styles.cardLabel}>Gastos en COP (Moneda Local)</span>
+                  <div className={styles.patrimonyValueRose} style={{ fontSize: '1.25rem' }}>
+                    {formatCurrencyCOP(totalExpensesCopOnly)}
+                  </div>
+                  <div className={styles.cardHintMuted}>
+                    {expensesCopTx.length}{' '}
+                    {expensesCopTx.length === 1 ? 'movimiento' : 'movimientos'} en cuentas COP (
+                    {selectedPeriod === 'ALL' ? 'Año 2026' : periodLabel})
+                  </div>
+                </div>
+
+                <div className={styles.savingsCardUsd}>
+                  <span className={styles.cardLabel}>
+                    Gastos en USD (
+                    {usdLiquidAccounts.length > 0
+                      ? usdLiquidAccounts.map((a) => a.name).join(', ')
+                      : 'Cuentas USD'}
+                    )
+                  </span>
+                  <div className={styles.cardValueAmber}>
+                    {formatCurrencyUSD(totalExpensesUsdOnly)}
+                  </div>
+                  <div className={styles.cardHintSlate}>
+                    ≈ {formatCurrencyCOP(totalExpensesUsdInCop)} COP a TRM · {expensesUsdTx.length}{' '}
+                    {expensesUsdTx.length === 1 ? 'movimiento' : 'movimientos'}
+                  </div>
+                </div>
+
+                <div className={styles.savingsCardCop}>
+                  <span className={styles.cardLabel}>Gastos Totales Consolidados (COP + USD)</span>
+                  <div className={styles.cardValueCyanLight}>
+                    {formatCurrencyCOP(totalExpensesYear)}
+                  </div>
+                  <div className={styles.cardHintMuted}>
+                    Sumatoria: {formatCurrencyCOP(totalExpensesCopOnly)} +{' '}
+                    {formatCurrencyUSD(totalExpensesUsdOnly)} (a TRM)
                   </div>
                 </div>
               </div>
@@ -1740,28 +2191,72 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
 
               {/* USD Row */}
               <div className={styles.usdGrid3}>
-                <div className={styles.savingsCardUsd}>
-                  <span className={styles.cardLabel}>Ahorro Total USD</span>
+                <div
+                  className={styles.savingsCardUsd}
+                  style={{ cursor: usdSavingsAccounts.length > 0 ? 'pointer' : 'default' }}
+                  onClick={() => {
+                    if (usdSavingsAccounts[0]) {
+                      openAccountReconciliation(usdSavingsAccounts[0].id);
+                    }
+                  }}
+                  title={
+                    usdSavingsAccounts[0]
+                      ? `Haz clic para ver detalle y conciliación de ${usdSavingsAccounts[0].name} (USD)`
+                      : undefined
+                  }
+                >
+                  <span className={styles.cardLabel}>
+                    Ahorro Total USD
+                    {usdSavingsAccounts.length > 0
+                      ? ` (${usdSavingsAccounts.map((a) => a.name).join(', ')})`
+                      : ''}
+                  </span>
                   <div className={styles.cardValueEmerald}>
                     {formatCurrencyUSD(totalSavingsUsd)}
                   </div>
                   <div className={styles.cardHintSlate}>
                     ≈ {formatCurrencyCOP(totalSavingsUsd * trm)} COP
+                    {usdSavingsAccounts.length > 0 ? ' · Ver detalle →' : ''}
                   </div>
                 </div>
 
-                <div className={styles.savingsCardUsd}>
-                  <span className={styles.cardLabel}>Inversión Total USD (Portafolio)</span>
+                <div
+                  className={styles.savingsCardUsd}
+                  style={{ cursor: portfolio.length > 0 ? 'pointer' : 'default' }}
+                  onClick={() => {
+                    if (portfolio.length > 0) {
+                      setIsPortfolioExpanded((prev) => !prev);
+                    }
+                  }}
+                  title={
+                    portfolio.length > 0
+                      ? 'Haz clic para mostrar u ocultar el detalle de tus acciones en USD'
+                      : undefined
+                  }
+                >
+                  <span className={styles.cardLabel}>
+                    Inversión Total USD (Portafolio){' '}
+                    {portfolio.length > 0 ? (isPortfolioExpanded ? '▾' : '▸') : ''}
+                  </span>
                   <div className={styles.cardValuePurple}>
                     {formatCurrencyUSD(totalPortfolioUsd)}
                   </div>
                   <div className={styles.cardHintSlate}>
-                    ≈ {formatCurrencyCOP(totalPortfolioUsd * trm)} COP ({portfolioTickersLabel})
+                    ≈ {formatCurrencyCOP(totalPortfolioUsd * trm)} COP ({portfolioTickersLabel}) ·{' '}
+                    {isPortfolioExpanded ? 'Ocultar detalle' : 'Ver detalle →'}
                   </div>
                 </div>
 
-                <div className={styles.savingsCardUsd}>
-                  <span className={styles.cardLabel}>Cuentas en USD</span>
+                <div
+                  className={styles.savingsCardUsd}
+                  style={{ cursor: usdDisplayAccounts.length > 0 ? 'pointer' : 'default' }}
+                  onClick={() => {
+                    if (usdDisplayAccounts[0]) {
+                      openAccountReconciliation(usdDisplayAccounts[0].id);
+                    }
+                  }}
+                >
+                  <span className={styles.cardLabel}>Total Cuentas en USD (Ahorro + Disponible)</span>
                   <div className={styles.cardValueAmber}>
                     {formatCurrencyUSD(totalUsdAccountsBalance)}
                   </div>
@@ -1964,6 +2459,49 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                       </span>
                     </div>
                   </div>
+
+                  {editableAssets.length > 0 && (
+                    <div className={styles.patrimonyItemsList}>
+                      <div className={styles.patrimonyListHeader}>
+                        <span>Activos Fijos ({editableAssets.length})</span>
+                        <span>Clic para editar</span>
+                      </div>
+                      {editableAssets.map((asset) => {
+                        const isUsd = asset.currency === 'USD';
+                        const copEquivalent = isUsd ? asset.amount * trm : asset.amount;
+                        return (
+                          <button
+                            key={asset.id}
+                            type="button"
+                            onClick={() => {
+                              setEditingPatrimonyItem(asset);
+                              setIsAssetModalOpen(true);
+                            }}
+                            className={styles.patrimonyItemBtn}
+                            title={`Editar ${asset.name} (${asset.type})`}
+                          >
+                            <div className={styles.patrimonyItemLeft}>
+                              <span className={styles.patrimonyItemName}>{asset.name}</span>
+                              <span className={styles.patrimonyItemSub}>
+                                {asset.type}
+                                {isUsd ? ` · Eq. ${formatCompactMillionsCOP(copEquivalent)} COP` : ''}
+                              </span>
+                            </div>
+                            <div className={styles.patrimonyItemRight}>
+                              <span className={styles.monoCyan}>
+                                {isUsd
+                                  ? formatCurrencyUSD(asset.amount)
+                                  : `${formatCompactMillionsCOP(asset.amount)} COP`}
+                              </span>
+                              <span className={styles.patrimonyEditBadge}>
+                                <Pencil style={{ width: '0.72rem', height: '0.72rem' }} />
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 <div className={styles.patrimonyCard}>
@@ -1983,6 +2521,57 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                       />
                     </div>
                   </div>
+
+                  {editableLiabilities.length > 0 && (
+                    <div className={styles.patrimonyItemsList}>
+                      <div className={styles.patrimonyListHeader}>
+                        <span>Deudas / Pasivos ({editableLiabilities.length})</span>
+                        <span>Clic para editar</span>
+                      </div>
+                      {editableLiabilities.map((lia) => {
+                        const isUsd = lia.currency === 'USD';
+                        const hasPaidDown =
+                          lia.originalAmount !== undefined &&
+                          lia.originalAmount > lia.amount;
+                        return (
+                          <button
+                            key={lia.id}
+                            type="button"
+                            onClick={() => {
+                              setEditingPatrimonyItem(lia);
+                              setIsAssetModalOpen(true);
+                            }}
+                            className={styles.patrimonyItemBtn}
+                            title={`Editar deuda ${lia.name} (${lia.type})`}
+                          >
+                            <div className={styles.patrimonyItemLeft}>
+                              <span className={styles.patrimonyItemName}>{lia.name}</span>
+                              <span className={styles.patrimonyItemSub}>
+                                {lia.type}
+                                {hasPaidDown
+                                  ? ` · Orig: ${
+                                      isUsd
+                                        ? formatCurrencyUSD(lia.originalAmount || 0)
+                                        : formatCompactMillionsCOP(lia.originalAmount || 0)
+                                    }`
+                                  : ''}
+                              </span>
+                            </div>
+                            <div className={styles.patrimonyItemRight}>
+                              <span className={styles.monoRose}>
+                                {isUsd
+                                  ? formatCurrencyUSD(lia.amount)
+                                  : `${formatCompactMillionsCOP(lia.amount)} COP`}
+                              </span>
+                              <span className={styles.patrimonyEditBadge}>
+                                <Pencil style={{ width: '0.72rem', height: '0.72rem' }} />
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 <div className={styles.patrimonyCard}>
@@ -2014,6 +2603,48 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                 <span>{deleteError}</span>
               </div>
             )}
+
+            <div className={styles.usdGrid3}>
+              <div className={styles.savingsCardCop}>
+                <span className={styles.cardLabel}>Gastos en COP (Moneda Local)</span>
+                <div className={styles.patrimonyValueRose} style={{ fontSize: '1.25rem' }}>
+                  {formatCurrencyCOP(totalExpensesCopOnly)}
+                </div>
+                <div className={styles.cardHintMuted}>
+                  {expensesCopTx.length}{' '}
+                  {expensesCopTx.length === 1 ? 'movimiento' : 'movimientos'} en cuentas COP (
+                  {selectedPeriod === 'ALL' ? 'Año 2026' : periodLabel})
+                </div>
+              </div>
+
+              <div className={styles.savingsCardUsd}>
+                <span className={styles.cardLabel}>
+                  Gastos en USD (
+                  {usdLiquidAccounts.length > 0
+                    ? usdLiquidAccounts.map((a) => a.name).join(', ')
+                    : 'Cuentas USD'}
+                  )
+                </span>
+                <div className={styles.cardValueAmber}>
+                  {formatCurrencyUSD(totalExpensesUsdOnly)}
+                </div>
+                <div className={styles.cardHintSlate}>
+                  ≈ {formatCurrencyCOP(totalExpensesUsdInCop)} COP a TRM · {expensesUsdTx.length}{' '}
+                  {expensesUsdTx.length === 1 ? 'movimiento' : 'movimientos'}
+                </div>
+              </div>
+
+              <div className={styles.savingsCardCop}>
+                <span className={styles.cardLabel}>Gastos Totales Consolidados (COP + USD)</span>
+                <div className={styles.cardValueCyanLight}>
+                  {formatCurrencyCOP(totalExpensesYear)}
+                </div>
+                <div className={styles.cardHintMuted}>
+                  Sumatoria: {formatCurrencyCOP(totalExpensesCopOnly)} +{' '}
+                  {formatCurrencyUSD(totalExpensesUsdOnly)} (a TRM)
+                </div>
+              </div>
+            </div>
 
             {selectedCategory && selectedSubcategory ? (
               <>

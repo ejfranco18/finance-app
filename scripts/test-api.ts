@@ -1,5 +1,5 @@
-// Tu UID real obtenido en la pantalla de prueba
-const USER_ID = "3x2MF8k8fneASdMnlP0iJaast132";
+// Define FIREBASE_TEST_USER_ID en tu .env local para pruebas
+const USER_ID = process.env.FIREBASE_TEST_USER_ID || process.env.USER_ID || "";
 const API_URL = "http://localhost:4000/api";
 
 async function runTests() {

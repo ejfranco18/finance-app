@@ -24,6 +24,12 @@ export async function createTransaction(req: Request, res: Response) {
     const categoryId = payload?.categoryId || null;
     const date = payload?.date;
     const amount = Number(payload?.amount);
+    const rawDestinationAmount =
+      payload?.destinationAmount !== undefined &&
+      payload?.destinationAmount !== null &&
+      payload?.destinationAmount !== ''
+        ? Number(payload.destinationAmount)
+        : null;
     const currency = payload?.currency || 'COP';
     const categoryType = payload?.categoryType || payload?.category;
     const categoryName = payload?.categoryName || payload?.subCategory || categoryType;
@@ -38,6 +44,8 @@ export async function createTransaction(req: Request, res: Response) {
       !date ||
       !Number.isFinite(amount) ||
       amount <= 0 ||
+      (rawDestinationAmount !== null &&
+        (!Number.isFinite(rawDestinationAmount) || rawDestinationAmount <= 0)) ||
       !categoryType ||
       !VALID_CATEGORY_TYPES.has(categoryType) ||
       !categoryName ||
@@ -87,9 +95,15 @@ export async function createTransaction(req: Request, res: Response) {
         }
       }
 
-      let resolvedDestinationAccountId: string | null = destinationAccountId
-        ? String(destinationAccountId)
-        : null;
+      const supportsDestinationAccount =
+        categoryType === 'TRANSFERENCIA' ||
+        categoryType === 'AHORRO' ||
+        categoryType === 'INVERSION';
+
+      let resolvedDestinationAccountId: string | null =
+        supportsDestinationAccount && destinationAccountId
+          ? String(destinationAccountId)
+          : null;
       if (resolvedDestinationAccountId) {
         const isDestUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           resolvedDestinationAccountId
@@ -104,6 +118,11 @@ export async function createTransaction(req: Request, res: Response) {
           }
         }
       }
+
+      const effectiveDestinationAmount =
+        supportsDestinationAccount && resolvedDestinationAccountId && rawDestinationAmount !== null
+          ? rawDestinationAmount
+          : null;
 
       // Asegurar que la categoría y subcategoría existan en la tabla categories
       let resolvedCategoryId = categoryId;
@@ -128,6 +147,7 @@ export async function createTransaction(req: Request, res: Response) {
           category_id,
           date,
           amount,
+          destination_amount,
           currency,
           category_type,
           category_name,
@@ -135,7 +155,7 @@ export async function createTransaction(req: Request, res: Response) {
           description,
           is_recurring
         )
-        VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5::date, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5::date, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING id`,
         [
           userId,
@@ -144,6 +164,7 @@ export async function createTransaction(req: Request, res: Response) {
           resolvedCategoryId,
           date,
           amount,
+          effectiveDestinationAmount,
           currency,
           categoryType,
           categoryName,
@@ -155,7 +176,7 @@ export async function createTransaction(req: Request, res: Response) {
 
       const transactionId = insertTx.rows[0].id;
 
-      // 4 & 5. Actualizar current_balance en accounts directamente en la moneda de la cuenta (sin TRM)
+      // 4 & 5. Actualizar current_balance en accounts directamente en la moneda de cada cuenta
       const isInflow = categoryType === 'INGRESO_FIJO' || categoryType === 'INGRESO_VARIABLE';
       const originDelta = isInflow ? amount : -amount;
 
@@ -173,19 +194,15 @@ export async function createTransaction(req: Request, res: Response) {
       }
 
       let destinationAccount = null;
-      const supportsDestinationAccount =
-        categoryType === 'TRANSFERENCIA' ||
-        categoryType === 'AHORRO' ||
-        categoryType === 'INVERSION';
-
       if (supportsDestinationAccount && resolvedDestinationAccountId) {
+        const destDelta = effectiveDestinationAmount ?? amount;
         const updateDest = await client.query<{ id: string; current_balance: string; currency: string }>(
           `UPDATE accounts
            SET current_balance = current_balance + $1,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = $2::uuid AND user_id = $3
            RETURNING id, current_balance, currency`,
-          [amount, resolvedDestinationAccountId, userId]
+          [destDelta, resolvedDestinationAccountId, userId]
         );
 
         if (updateDest.rowCount === 0) {
@@ -234,11 +251,12 @@ export async function deleteTransaction(req: Request, res: Response) {
         account_id: string;
         destination_account_id: string | null;
         amount: string;
+        destination_amount: string | null;
         category_type: string;
       }>(
         `DELETE FROM transactions
          WHERE id = $1::uuid AND user_id = $2
-         RETURNING account_id, destination_account_id, amount, category_type`,
+         RETURNING account_id, destination_account_id, amount, destination_amount, category_type`,
         [transactionId, userId]
       );
 
@@ -248,6 +266,10 @@ export async function deleteTransaction(req: Request, res: Response) {
 
       const tx = delRes.rows[0];
       const amount = Number(tx.amount);
+      const destAmount =
+        tx.destination_amount !== null && tx.destination_amount !== undefined
+          ? Number(tx.destination_amount)
+          : amount;
       const isInflow = tx.category_type === 'INGRESO_FIJO' || tx.category_type === 'INGRESO_VARIABLE';
       const revertDelta = isInflow ? -amount : amount;
 
@@ -270,7 +292,7 @@ export async function deleteTransaction(req: Request, res: Response) {
            SET current_balance = current_balance - $1,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = $2::uuid AND user_id = $3`,
-          [amount, tx.destination_account_id, userId]
+          [destAmount, tx.destination_account_id, userId]
         );
       }
 
@@ -302,6 +324,12 @@ export async function updateTransaction(req: Request, res: Response) {
     const categoryId = payload?.categoryId || null;
     const date = payload?.date;
     const amount = Number(payload?.amount);
+    const rawDestinationAmount =
+      payload?.destinationAmount !== undefined &&
+      payload?.destinationAmount !== null &&
+      payload?.destinationAmount !== ''
+        ? Number(payload.destinationAmount)
+        : null;
     const currency = payload?.currency || 'COP';
     const categoryType = payload?.categoryType || payload?.category;
     const categoryName = payload?.categoryName || payload?.subCategory || categoryType;
@@ -316,6 +344,8 @@ export async function updateTransaction(req: Request, res: Response) {
       !date ||
       !Number.isFinite(amount) ||
       amount <= 0 ||
+      (rawDestinationAmount !== null &&
+        (!Number.isFinite(rawDestinationAmount) || rawDestinationAmount <= 0)) ||
       !categoryType ||
       !VALID_CATEGORY_TYPES.has(categoryType) ||
       !categoryName ||
@@ -345,9 +375,10 @@ export async function updateTransaction(req: Request, res: Response) {
         account_id: string;
         destination_account_id: string | null;
         amount: string;
+        destination_amount: string | null;
         category_type: string;
       }>(
-        `SELECT account_id, destination_account_id, amount, category_type
+        `SELECT account_id, destination_account_id, amount, destination_amount, category_type
          FROM transactions
          WHERE id = $1::uuid AND user_id = $2
          FOR UPDATE`,
@@ -360,6 +391,10 @@ export async function updateTransaction(req: Request, res: Response) {
 
       const oldTx = existingRes.rows[0];
       const oldAmount = Number(oldTx.amount);
+      const oldDestAmount =
+        oldTx.destination_amount !== null && oldTx.destination_amount !== undefined
+          ? Number(oldTx.destination_amount)
+          : oldAmount;
       const wasInflow =
         oldTx.category_type === 'INGRESO_FIJO' || oldTx.category_type === 'INGRESO_VARIABLE';
       const revertDelta = wasInflow ? -oldAmount : oldAmount;
@@ -384,7 +419,7 @@ export async function updateTransaction(req: Request, res: Response) {
            SET current_balance = current_balance - $1,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = $2::uuid AND user_id = $3`,
-          [oldAmount, oldTx.destination_account_id, userId]
+          [oldDestAmount, oldTx.destination_account_id, userId]
         );
       }
 
@@ -428,6 +463,11 @@ export async function updateTransaction(req: Request, res: Response) {
         }
       }
 
+      const effectiveDestinationAmount =
+        supportsDestinationAccount && resolvedDestinationAccountId && rawDestinationAmount !== null
+          ? rawDestinationAmount
+          : null;
+
       let resolvedCategoryId = categoryId;
       if (!resolvedCategoryId && categoryName) {
         const catRes = await client.query<{ id: string }>(
@@ -449,19 +489,21 @@ export async function updateTransaction(req: Request, res: Response) {
              category_id = $3::uuid,
              date = $4::date,
              amount = $5,
-             currency = $6,
-             category_type = $7,
-             category_name = $8,
-             sub_category_name = $9,
-             description = $10,
-             is_recurring = $11
-         WHERE id = $12::uuid AND user_id = $13`,
+             destination_amount = $6,
+             currency = $7,
+             category_type = $8,
+             category_name = $9,
+             sub_category_name = $10,
+             description = $11,
+             is_recurring = $12
+         WHERE id = $13::uuid AND user_id = $14`,
         [
           resolvedAccountId,
           resolvedDestinationAccountId,
           resolvedCategoryId,
           date,
           amount,
+          effectiveDestinationAmount,
           currency,
           categoryType,
           categoryName,
@@ -496,6 +538,7 @@ export async function updateTransaction(req: Request, res: Response) {
 
       let destinationAccount = null;
       if (supportsDestinationAccount && resolvedDestinationAccountId) {
+        const destDelta = effectiveDestinationAmount ?? amount;
         const updateDest = await client.query<{
           id: string;
           current_balance: string;
@@ -506,7 +549,7 @@ export async function updateTransaction(req: Request, res: Response) {
                updated_at = CURRENT_TIMESTAMP
            WHERE id = $2::uuid AND user_id = $3
            RETURNING id, current_balance, currency`,
-          [amount, resolvedDestinationAccountId, userId]
+          [destDelta, resolvedDestinationAccountId, userId]
         );
 
         if (updateDest.rowCount === 0) {

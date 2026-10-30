@@ -19,6 +19,8 @@ import {
   getDatabaseOverview,
   getCanvasDashboard,
   createPatrimonyRecord,
+  updatePatrimonyRecord,
+  deletePatrimonyRecord,
   updatePeriodSettings,
 } from './controllers/viewsController';
 import {
@@ -54,7 +56,7 @@ app.get('/api/cron/daily-interest', runDailyInterestCron);
 app.post('/api/cron/daily-interest', runDailyInterestCron);
 
 // Inspección de base de datos (DBTest.tsx)
-app.get('/api/db-overview', getDatabaseOverview);
+app.get('/api/db-overview', authenticateUser, getDatabaseOverview);
 
 // 0. Creación y Conciliación de Cuentas (Bancos, Billeteras, Efectivo, Brokers)
 app.post('/api/accounts', authenticateUser, createAccount);
@@ -71,6 +73,9 @@ app.delete('/api/users/:userId/transactions/:transactionId', authenticateUser, d
 // 2. Pago a Pasivos / Deudas y Gestión Patrimonial (Activos / Pasivos / Cuentas)
 app.post('/api/liabilities/payments', authenticateUser, createLiabilityPayment);
 app.post('/api/patrimony', authenticateUser, createPatrimonyRecord);
+app.put('/api/patrimony/:id', authenticateUser, updatePatrimonyRecord);
+app.post('/api/patrimony/:id', authenticateUser, updatePatrimonyRecord);
+app.delete('/api/patrimony/:id', authenticateUser, deletePatrimonyRecord);
 app.post('/api/settings', authenticateUser, updatePeriodSettings);
 app.put('/api/settings', authenticateUser, updatePeriodSettings);
 
