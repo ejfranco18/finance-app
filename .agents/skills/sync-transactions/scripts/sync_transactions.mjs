@@ -6,7 +6,17 @@ const ROOT_DIR = process.cwd();
 const TRANSACTIONS_FILE = path.join(ROOT_DIR, 'transactions.md');
 const CATEGORIES_FILE = path.join(ROOT_DIR, 'categories.md');
 const QUERY_FILE = path.join(ROOT_DIR, 'query.md');
-const DEFAULT_USER_ID = '3x2MF8k8fneASdMnlP0iJaast132';
+
+function resolveDefaultUserId() {
+  if (process.env.FIREBASE_TEST_USER_ID) return process.env.FIREBASE_TEST_USER_ID;
+  if (process.env.USER_ID) return process.env.USER_ID;
+  if (fs.existsSync(QUERY_FILE)) {
+    const content = fs.readFileSync(QUERY_FILE, 'utf8');
+    const match = content.match(/v_user_id\s+VARCHAR\(\d+\)\s*:=\s*'([^']+)'/i);
+    if (match && match[1]) return match[1];
+  }
+  throw new Error('Define FIREBASE_TEST_USER_ID en .env o v_user_id en query.md');
+}
 
 // Known aliases from transactions.md shorthand to official categories.md sub_category_name
 const SUBCATEGORY_ALIASES = {
@@ -381,7 +391,7 @@ async function main() {
   updateQueryMdFile(QUERY_FILE, transactions);
   console.log(`📝 Actualizado query.md (Sección 7) con ${transactions.length} sentencias INSERT`);
 
-  await syncDatabase(transactions, catalogMap, DEFAULT_USER_ID);
+  await syncDatabase(transactions, catalogMap, resolveDefaultUserId());
 }
 
 main().catch((err) => {

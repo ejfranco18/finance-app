@@ -210,6 +210,7 @@ export interface EditableTransaction {
   date: string;
   description: string;
   amount: string | number;
+  destination_amount?: string | number | null;
   currency: string;
   category_type: string;
   category_name: string;
@@ -224,6 +225,7 @@ export interface InitialTransactionDraft {
   monto?: number | string;
   moneda?: CurrencyCode;
   cuentaOrigenId?: string;
+  cuentaDestinoId?: string;
   categoriaMacroId?: string;
   subcategoria?: string;
   descripcion?: string;
@@ -259,6 +261,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   const isEditing = Boolean(editingTransaction?.id);
   const [tipo, setTipo] = useState<TransactionType>('gasto');
   const [monto, setMonto] = useState<string>('');
+  const [montoDestino, setMontoDestino] = useState<string>('');
   const [moneda, setMoneda] = useState<CurrencyCode>('COP');
   const [fecha, setFecha] = useState<string>(new Date().toISOString().split('T')[0]);
   const [cuentaOrigenId, setCuentaOrigenId] = useState<AccountSource>(
@@ -278,6 +281,19 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   const selectedCategoryGroup =
     availableCategories.find((c) => c.name === categoriaMacroId) || availableCategories[0];
   const availableSubcategories = selectedCategoryGroup?.subcategories || [];
+
+  const originAccount = accounts.find((a) => a.id === cuentaOrigenId);
+  const destAccount =
+    (tipo === 'transferencia' || tipo === 'ahorro_inversion') && cuentaDestinoId
+      ? accounts.find((a) => a.id === cuentaDestinoId)
+      : undefined;
+  const isCrossCurrency = Boolean(
+    originAccount &&
+      destAccount &&
+      originAccount.currency &&
+      destAccount.currency &&
+      originAccount.currency !== destAccount.currency
+  );
 
   const handleTipoChange = (newTipo: TransactionType) => {
     setTipo(newTipo);
@@ -343,6 +359,12 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       const mappedTipo = mapDbCategoryTypeToUiType(editingTransaction.category_type);
       setTipo(mappedTipo);
       setMonto(String(Number(editingTransaction.amount)));
+      setMontoDestino(
+        editingTransaction.destination_amount !== null &&
+          editingTransaction.destination_amount !== undefined
+          ? String(Number(editingTransaction.destination_amount))
+          : ''
+      );
       setMoneda(editingTransaction.currency === 'USD' ? 'USD' : 'COP');
       setFecha(editingTransaction.date || new Date().toISOString().split('T')[0]);
       setCuentaOrigenId(
@@ -357,12 +379,16 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       const draftTipo = initialDraft.tipo || 'gasto';
       setTipo(draftTipo);
       setMonto(initialDraft.monto !== undefined ? String(initialDraft.monto) : '');
+      setMontoDestino('');
       setMoneda(initialDraft.moneda || 'COP');
       setFecha(new Date().toISOString().split('T')[0]);
       if (initialDraft.cuentaOrigenId) {
         setCuentaOrigenId(initialDraft.cuentaOrigenId);
       } else if (accounts[0]?.id) {
         setCuentaOrigenId(accounts[0].id);
+      }
+      if (initialDraft.cuentaDestinoId) {
+        setCuentaDestinoId(initialDraft.cuentaDestinoId);
       }
       const defaultCatGroup =
         CATEGORIES_BY_TYPE[draftTipo]?.find((c) => c.name === initialDraft.categoriaMacroId) ||
@@ -376,6 +402,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
     } else {
       setTipo('gasto');
       setMonto('');
+      setMontoDestino('');
       setMoneda('COP');
       setFecha(new Date().toISOString().split('T')[0]);
       if (accounts[0]?.id) {
@@ -412,6 +439,13 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       newErrors.cuentaDestinoId = 'La cuenta de origen y destino deben ser diferentes.';
     }
 
+    if (isCrossCurrency) {
+      const numericDestAmount = parseFloat(montoDestino);
+      if (!montoDestino || isNaN(numericDestAmount) || numericDestAmount <= 0) {
+        newErrors.montoDestino = `Indica cuántos ${destAccount?.currency || 'USD'} recibiste en ${destAccount?.name || 'la cuenta destino'}.`;
+      }
+    }
+
     if (!subcategoria.trim() || subcategoria.trim().length < 2) {
       newErrors.subcategoria = 'Debes seleccionar una subcategoría válida.';
     }
@@ -439,6 +473,8 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       (tipo === 'transferencia' || tipo === 'ahorro_inversion') && cuentaDestinoId
         ? cuentaDestinoId
         : undefined;
+    const effectiveDestinationAmount =
+      effectiveDestinationAccountId && isCrossCurrency ? parseFloat(montoDestino) : undefined;
 
     try {
       const headers = await buildAuthHeaders();
@@ -456,6 +492,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
           destinationAccountId: effectiveDestinationAccountId,
           date: fecha,
           amount: numericAmount,
+          destinationAmount: effectiveDestinationAmount,
           currency: moneda,
           categoryType,
           categoryName,
@@ -478,6 +515,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       const payload: TransactionPayload = {
         tipo,
         monto: numericAmount,
+        montoDestino: effectiveDestinationAmount,
         moneda,
         fecha,
         cuentaOrigenId,
@@ -576,6 +614,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                   onClick={() => {
                     setSuccessPayload(null);
                     setMonto('');
+                    setMontoDestino('');
                     setDescripcion('');
                   }}
                   className={styles.secondaryActionBtn}
@@ -637,7 +676,10 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
             <div className={styles.gridAmountRow}>
               <div className={styles.colSpan2}>
                 <label htmlFor="tx-monto" className={styles.label}>
-                  Monto <span className={styles.requiredStar}>*</span>
+                  {isCrossCurrency
+                    ? `Monto que sale de ${originAccount?.name} (${originAccount?.currency})`
+                    : 'Monto'}{' '}
+                  <span className={styles.requiredStar}>*</span>
                 </label>
                 <div className={styles.inputWrapper}>
                   <input
@@ -708,7 +750,12 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                   name="cuentaOrigenId"
                   value={cuentaOrigenId}
                   onChange={(e) => {
-                    setCuentaOrigenId(e.target.value as AccountSource);
+                    const nextOriginId = e.target.value as AccountSource;
+                    setCuentaOrigenId(nextOriginId);
+                    const nextOriginAcc = accounts.find((a) => a.id === nextOriginId);
+                    if (nextOriginAcc?.currency === 'USD' || nextOriginAcc?.currency === 'COP') {
+                      setMoneda(nextOriginAcc.currency);
+                    }
                     if (errors.cuentaDestinoId) {
                       setErrors((prev) => ({ ...prev, cuentaDestinoId: '' }));
                     }
@@ -753,6 +800,9 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                     if (errors.cuentaDestinoId) {
                       setErrors((prev) => ({ ...prev, cuentaDestinoId: '' }));
                     }
+                    if (errors.montoDestino) {
+                      setErrors((prev) => ({ ...prev, montoDestino: '' }));
+                    }
                   }}
                   aria-invalid={!!errors.cuentaDestinoId}
                   className={styles.inputPurple}
@@ -778,6 +828,79 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
                 {errors.cuentaDestinoId && (
                   <p className={styles.errorText}>
                     <AlertCircle className={styles.errorIcon} /> {errors.cuentaDestinoId}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {isCrossCurrency && destAccount && (
+              <div>
+                <label htmlFor="tx-monto-destino" className={styles.label}>
+                  Monto recibido en {destAccount.name} ({destAccount.currency}){' '}
+                  <span className={styles.requiredStar}>*</span>
+                </label>
+                <div className={styles.inputWrapper}>
+                  <input
+                    id="tx-monto-destino"
+                    name="montoDestino"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder={
+                      destAccount.currency === 'USD' ? 'ej. 632.45' : 'ej. 2000000'
+                    }
+                    value={montoDestino}
+                    onChange={(e) => {
+                      setMontoDestino(e.target.value);
+                      if (errors.montoDestino) {
+                        setErrors((prev) => ({ ...prev, montoDestino: '' }));
+                      }
+                    }}
+                    aria-invalid={!!errors.montoDestino}
+                    className={styles.inputMono}
+                  />
+                </div>
+                {(() => {
+                  const numOrig = parseFloat(monto);
+                  const numDest = parseFloat(montoDestino);
+                  if (numOrig > 0 && numDest > 0) {
+                    const impliedRate =
+                      originAccount?.currency === 'COP'
+                        ? numOrig / numDest
+                        : numDest / numOrig;
+                    return (
+                      <p
+                        style={{
+                          margin: '6px 0 0',
+                          fontSize: '0.75rem',
+                          color: '#38bdf8',
+                        }}
+                      >
+                        💱 Conversión: {originAccount?.currency === 'COP' ? '$' : 'US$'}{' '}
+                        {numOrig.toLocaleString('es-CO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        {originAccount?.currency} ➔{' '}
+                        {destAccount.currency === 'USD' ? 'US$' : '$'}{' '}
+                        {numDest.toLocaleString('es-CO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        {destAccount.currency} (Tasa implícita: ${' '}
+                        {impliedRate.toLocaleString('es-CO', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        COP/USD)
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+                {errors.montoDestino && (
+                  <p className={styles.errorText}>
+                    <AlertCircle className={styles.errorIcon} /> {errors.montoDestino}
                   </p>
                 )}
               </div>
@@ -904,60 +1027,119 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
    FORMULARIO 2: REGISTRO / ACTUALIZACIÓN DE ACTIVO, INVERSIÓN O PASIVO
    ========================================================================= */
 
+export interface EditablePatrimonyItem {
+  id: string;
+  tipoClasificacion: 'activo_fijo_inversion' | 'pasivo_deuda';
+  name: string;
+  type: string;
+  currency: CurrencyCode;
+  amount: number;
+  originalAmount?: number;
+  interestRate?: number;
+}
+
 interface AssetLiabilityFormProps {
   isOpen: boolean;
   onClose: () => void;
+  editingItem?: EditablePatrimonyItem | null;
+  existingAssets?: EditablePatrimonyItem[];
+  existingLiabilities?: EditablePatrimonyItem[];
   onSubmitSuccess?: (payload: AssetLiabilityPayload) => void;
 }
 
 export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
   isOpen,
   onClose,
+  editingItem = null,
+  existingAssets = [],
+  existingLiabilities = [],
   onSubmitSuccess,
 }) => {
   const queryClient = useQueryClient();
+  const [activeEditId, setActiveEditId] = useState<string>('');
   const [tipoClasificacion, setTipoClasificacion] =
     useState<AssetLiabilityType>('activo_fijo_inversion');
   const [nombreInstrumento, setNombreInstrumento] = useState<string>('');
   const [institucion, setInstitucion] = useState<string>('');
   const [moneda, setMoneda] = useState<CurrencyCode>('COP');
   const [valorMonto, setValorMonto] = useState<string>('');
+  const [montoOriginal, setMontoOriginal] = useState<string>('');
   const [tasaRendimientoOInteres, setTasaRendimientoOInteres] = useState<string>('');
   const [fechaValoracion, setFechaValoracion] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
   const [esLiquidezInmediata, setEsLiquidezInmediata] = useState<boolean>(false);
   const [notasAclaratorias, setNotasAclaratorias] = useState<string>('');
+  const [confirmDelete, setConfirmDelete] = useState<boolean>(false);
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [successPayload, setSuccessPayload] = useState<AssetLiabilityPayload | null>(null);
 
+  const loadItemIntoForm = (item: EditablePatrimonyItem | null) => {
+    setConfirmDelete(false);
+    setErrors({});
+    if (!item) {
+      setActiveEditId('');
+      setTipoClasificacion('activo_fijo_inversion');
+      setNombreInstrumento('');
+      setInstitucion('');
+      setMoneda('COP');
+      setValorMonto('');
+      setMontoOriginal('');
+      setTasaRendimientoOInteres('');
+      setEsLiquidezInmediata(false);
+      return;
+    }
+    setActiveEditId(item.id);
+    setTipoClasificacion(item.tipoClasificacion);
+    setNombreInstrumento(item.name);
+    setInstitucion(item.type);
+    setMoneda(item.currency === 'USD' ? 'USD' : 'COP');
+    setValorMonto(String(item.amount));
+    setMontoOriginal(
+      item.originalAmount !== undefined && item.originalAmount !== null
+        ? String(item.originalAmount)
+        : ''
+    );
+    setTasaRendimientoOInteres(
+      item.interestRate !== undefined && item.interestRate !== null ? String(item.interestRate) : ''
+    );
+    setEsLiquidezInmediata(false);
+  };
+
   useEffect(() => {
     if (isOpen) {
       setSuccessPayload(null);
       setErrors({});
+      setConfirmDelete(false);
+      loadItemIntoForm(editingItem || null);
     }
-  }, [isOpen]);
+  }, [isOpen, editingItem]);
 
   if (!isOpen) return null;
+
+  const isEditing = Boolean(activeEditId);
+  const allExistingItems: EditablePatrimonyItem[] = [...existingAssets, ...existingLiabilities];
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
 
-    if (!nombreInstrumento.trim() || nombreInstrumento.trim().length < 3) {
+    if (!nombreInstrumento.trim() || nombreInstrumento.trim().length < 2) {
       newErrors.nombreInstrumento =
-        'El nombre del activo o deuda debe tener al menos 3 caracteres.';
+        'El nombre del activo o deuda debe tener al menos 2 caracteres.';
     }
 
     if (!institucion.trim()) {
       newErrors.institucion =
-        'Indica la entidad o plataforma (ej. Bancolombia, Littio, Protti, S&P500).';
+        'Indica el tipo o entidad (ej. Inmueble, Vehículo, Crédito hipotecario).';
     }
 
     const val = parseFloat(valorMonto);
-    if (!valorMonto || isNaN(val) || val <= 0) {
-      newErrors.valorMonto = 'El valor o saldo adeudado debe ser mayor a 0.';
+    if (valorMonto === '' || isNaN(val) || (isEditing ? val < 0 : val <= 0)) {
+      newErrors.valorMonto = isEditing
+        ? 'El valor o saldo actual debe ser mayor o igual a 0.'
+        : 'El valor o saldo adeudado debe ser mayor a 0.';
     }
 
     setErrors(newErrors);
@@ -972,12 +1154,19 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
     setSuccessPayload(null);
     setErrors({});
 
+    const parsedOriginal =
+      tipoClasificacion === 'pasivo_deuda' && montoOriginal !== '' && !isNaN(parseFloat(montoOriginal))
+        ? parseFloat(montoOriginal)
+        : undefined;
+
     const payload: AssetLiabilityPayload = {
+      id: isEditing ? activeEditId : undefined,
       tipoClasificacion,
       nombreInstrumento: nombreInstrumento.trim(),
       institucion: institucion.trim(),
       moneda,
       valorMonto: parseFloat(valorMonto),
+      montoOriginal: parsedOriginal,
       tasaRendimientoOInteres: tasaRendimientoOInteres
         ? parseFloat(tasaRendimientoOInteres)
         : undefined,
@@ -988,8 +1177,11 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
 
     try {
       const headers = await buildAuthHeaders();
-      const response = await fetch('/api/patrimony', {
-        method: 'POST',
+      const endpoint = isEditing ? `/api/patrimony/${activeEditId}` : '/api/patrimony';
+      const method = isEditing ? 'PUT' : 'POST';
+
+      const response = await fetch(endpoint, {
+        method,
         headers,
         body: JSON.stringify(payload),
       });
@@ -1011,6 +1203,35 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
     }
   };
 
+  const handleDelete = async () => {
+    if (!activeEditId) return;
+    setIsLoading(true);
+    setErrors({});
+    try {
+      const headers = await buildAuthHeaders();
+      const response = await fetch(
+        `/api/patrimony/${activeEditId}?tipoClasificacion=${encodeURIComponent(tipoClasificacion)}`,
+        {
+          method: 'DELETE',
+          headers,
+        }
+      );
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || 'No se pudo eliminar el registro patrimonial.');
+      }
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+      onClose();
+    } catch (err) {
+      setErrors({
+        submit: err instanceof Error ? err.message : 'Error al eliminar registro en Neon DB.',
+      });
+    } finally {
+      setIsLoading(false);
+      setConfirmDelete(false);
+    }
+  };
+
   return (
     <div className={styles.overlay}>
       <div
@@ -1028,7 +1249,9 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
             </div>
             <div>
               <h2 id="asset-form-title" className={styles.modalTitle}>
-                Gestionar Activo, Inversión o Pasivo
+                {isEditing
+                  ? 'Editar Activo o Pasivo Existente'
+                  : 'Gestionar Activo, Inversión o Pasivo'}
               </h2>
               <p className={styles.modalSubtitle}>
                 Impacta el cálculo del Balance General y Patrimonio Neto
@@ -1057,7 +1280,9 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
                 <span className={styles.payloadLabelCyan}>
                   <Code2 className={styles.smallIcon} /> Payload Guardado en DB
                 </span>
-                <span className={styles.statusCyan}>Status: 201 Created</span>
+                <span className={styles.statusCyan}>
+                  {isEditing ? 'Status: 200 Updated' : 'Status: 201 Created'}
+                </span>
               </div>
               <pre className={styles.payloadPre}>{JSON.stringify(successPayload, null, 2)}</pre>
             </div>
@@ -1067,13 +1292,11 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
                 type="button"
                 onClick={() => {
                   setSuccessPayload(null);
-                  setNombreInstrumento('');
-                  setInstitucion('');
-                  setValorMonto('');
+                  loadItemIntoForm(null);
                 }}
                 className={styles.secondaryActionBtn}
               >
-                Añadir Otro
+                Gestionar Otro
               </button>
               <button type="button" onClick={onClose} className={styles.doneBtnCyan}>
                 Cerrar y Ver Balance
@@ -1082,25 +1305,80 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
           </div>
         ) : (
           <form onSubmit={handleSubmit} noValidate className={styles.form}>
+            {/* Selector rápido para editar activo/pasivo existente o crear uno nuevo */}
+            {allExistingItems.length > 0 && (
+              <div>
+                <label htmlFor="al-select-existing" className={styles.label}>
+                  Acción / Registro a Gestionar
+                </label>
+                <select
+                  id="al-select-existing"
+                  value={activeEditId}
+                  onChange={(e) => {
+                    const selectedId = e.target.value;
+                    if (!selectedId) {
+                      loadItemIntoForm(null);
+                      return;
+                    }
+                    const found = allExistingItems.find((it) => it.id === selectedId) || null;
+                    loadItemIntoForm(found);
+                  }}
+                  className={styles.inputCyan}
+                >
+                  <option value="">+ Crear Nuevo Activo o Pasivo</option>
+                  {existingAssets.length > 0 && (
+                    <optgroup label="Activos Fijos / Inversiones Existentes">
+                      {existingAssets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          ✎ Activo: {asset.name} ({asset.type} ·{' '}
+                          {asset.currency === 'USD'
+                            ? `US$ ${asset.amount.toLocaleString('en-US')}`
+                            : `$ ${asset.amount.toLocaleString('es-CO')} COP`}
+                          )
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {existingLiabilities.length > 0 && (
+                    <optgroup label="Pasivos / Deudas Existentes">
+                      {existingLiabilities.map((lia) => (
+                        <option key={lia.id} value={lia.id}>
+                          ✎ Pasivo: {lia.name} ({lia.type} ·{' '}
+                          {lia.currency === 'USD'
+                            ? `US$ ${lia.amount.toLocaleString('en-US')}`
+                            : `$ ${lia.amount.toLocaleString('es-CO')} COP`}
+                          )
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+            )}
+
             {/* Clasificación Patrimonial */}
             <div>
               <label className={styles.labelSpaced}>Clasificación Contable</label>
               <div className={styles.segmentedGrid}>
+                {!isEditing && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTipoClasificacion('activo_liquido');
+                      setEsLiquidezInmediata(true);
+                    }}
+                    className={`${styles.segBtn} ${
+                      tipoClasificacion === 'activo_liquido' ? styles.segBtnActiveEmerald : ''
+                    }`}
+                  >
+                    Activo Líquido
+                  </button>
+                )}
                 <button
                   type="button"
+                  disabled={isEditing}
                   onClick={() => {
-                    setTipoClasificacion('activo_liquido');
-                    setEsLiquidezInmediata(true);
-                  }}
-                  className={`${styles.segBtn} ${
-                    tipoClasificacion === 'activo_liquido' ? styles.segBtnActiveEmerald : ''
-                  }`}
-                >
-                  Activo Líquido
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
+                    if (isEditing) return;
                     setTipoClasificacion('activo_fijo_inversion');
                     setEsLiquidezInmediata(false);
                   }}
@@ -1112,7 +1390,9 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={isEditing}
                   onClick={() => {
+                    if (isEditing) return;
                     setTipoClasificacion('pasivo_deuda');
                     setEsLiquidezInmediata(false);
                   }}
@@ -1125,16 +1405,16 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
               </div>
             </div>
 
-            {/* Nombre y Entidad */}
+            {/* Nombre y Tipo / Entidad */}
             <div className={styles.gridTwoCols}>
               <div>
                 <label htmlFor="al-nombre" className={styles.label}>
-                  Nombre del Instrumento / Activo <span className={styles.requiredStar}>*</span>
+                  Nombre del Activo / Pasivo <span className={styles.requiredStar}>*</span>
                 </label>
                 <input
                   id="al-nombre"
                   type="text"
-                  placeholder="ej. Acciones Apple, Hipoteca Apto, Nu Ahorro"
+                  placeholder="ej. Macerata, Meridiano, BYD, Larimar"
                   value={nombreInstrumento}
                   onChange={(e) => {
                     setNombreInstrumento(e.target.value);
@@ -1153,12 +1433,12 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
 
               <div>
                 <label htmlFor="al-entidad" className={styles.label}>
-                  Entidad / Custodio <span className={styles.requiredStar}>*</span>
+                  Tipo / Entidad <span className={styles.requiredStar}>*</span>
                 </label>
                 <input
                   id="al-entidad"
                   type="text"
-                  placeholder="ej. Bancolombia, Littio, Protti, Interactive Brokers"
+                  placeholder="ej. Inmueble, Vehículo, Crédito hipotecario"
                   value={institucion}
                   onChange={(e) => {
                     setInstitucion(e.target.value);
@@ -1175,18 +1455,21 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
               </div>
             </div>
 
-            {/* Valor y Moneda */}
+            {/* Valor Actual y Moneda */}
             <div className={styles.gridAmountRow}>
               <div className={styles.colSpan2}>
                 <label htmlFor="al-valor" className={styles.label}>
-                  Valor Actual o Saldo Deuda <span className={styles.requiredStar}>*</span>
+                  {tipoClasificacion === 'pasivo_deuda'
+                    ? 'Saldo Actual de la Deuda'
+                    : 'Valor Estimado Actual'}{' '}
+                  <span className={styles.requiredStar}>*</span>
                 </label>
                 <input
                   id="al-valor"
                   type="number"
                   step="0.01"
                   min="0"
-                  placeholder="ej. 357000000"
+                  placeholder="ej. 400000000"
                   value={valorMonto}
                   onChange={(e) => {
                     setValorMonto(e.target.value);
@@ -1217,6 +1500,25 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
                 </select>
               </div>
             </div>
+
+            {/* Si es Pasivo, permitir actualizar también Monto Original del Crédito */}
+            {tipoClasificacion === 'pasivo_deuda' && (
+              <div>
+                <label htmlFor="al-monto-original" className={styles.label}>
+                  Monto Original del Crédito (Opcional)
+                </label>
+                <input
+                  id="al-monto-original"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="ej. 250000000"
+                  value={montoOriginal}
+                  onChange={(e) => setMontoOriginal(e.target.value)}
+                  className={styles.inputMonoCyan}
+                />
+              </div>
+            )}
 
             {/* Tasa y Fecha */}
             <div className={styles.gridTwoCols}>
@@ -1249,7 +1551,7 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
               </div>
             </div>
 
-            {tipoClasificacion === 'activo_liquido' && (
+            {tipoClasificacion === 'activo_liquido' && !isEditing && (
               <div className={styles.checkboxRow}>
                 <input
                   id="al-liquido"
@@ -1272,14 +1574,48 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
 
             {/* Actions */}
             <div className={styles.footerActions}>
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={isLoading}
-                className={styles.cancelBtn}
-              >
-                Cancelar
-              </button>
+              {isEditing ? (
+                confirmDelete ? (
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      disabled={isLoading}
+                      className={styles.cancelBtn}
+                      style={{ color: '#fda4af', borderColor: 'rgba(244, 63, 94, 0.45)' }}
+                    >
+                      Confirmar Eliminar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(false)}
+                      disabled={isLoading}
+                      className={styles.cancelBtn}
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(true)}
+                    disabled={isLoading}
+                    className={styles.cancelBtn}
+                    style={{ color: '#fda4af', borderColor: 'rgba(244, 63, 94, 0.35)' }}
+                  >
+                    Eliminar Registro
+                  </button>
+                )
+              ) : (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={isLoading}
+                  className={styles.cancelBtn}
+                >
+                  Cancelar
+                </button>
+              )}
 
               <button type="submit" disabled={isLoading} className={styles.submitBtnCyan}>
                 {isLoading ? (
@@ -1289,7 +1625,7 @@ export const AssetLiabilityFormModal: React.FC<AssetLiabilityFormProps> = ({
                   </>
                 ) : (
                   <>
-                    <span>Guardar Registro</span>
+                    <span>{isEditing ? 'Guardar Cambios' : 'Guardar Registro'}</span>
                     <ArrowRight className={styles.arrowIcon} />
                   </>
                 )}

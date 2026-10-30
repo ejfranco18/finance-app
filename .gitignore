@@ -2,3 +2,5 @@
 /dist
 .env
 .neon
+query.md
+transactions.md

@@ -120,7 +120,7 @@ export async function authenticateUser(req: Request, res: Response, next: NextFu
   }
 
   // En desarrollo local permite fallback a userId en body/params/header para scripts de prueba (ej. scripts/test-api.ts)
-  if (process.env.NODE_ENV !== 'production') {
+  if (!process.env.VERCEL && process.env.NODE_ENV === 'development') {
     const devUserId =
       (req.headers['x-user-id'] as string | undefined) ||
       req.body?.userId ||

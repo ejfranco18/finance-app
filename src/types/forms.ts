@@ -29,6 +29,7 @@ export type AssetLiabilityType =
 export interface TransactionPayload {
   tipo: TransactionType;
   monto: number;
+  montoDestino?: number;
   moneda: CurrencyCode;
   fecha: string;
   cuentaOrigenId: AccountSource;
@@ -44,11 +45,13 @@ export interface TransactionPayload {
 }
 
 export interface AssetLiabilityPayload {
+  id?: string;
   tipoClasificacion: AssetLiabilityType;
   nombreInstrumento: string;
   institucion: string;
   moneda: CurrencyCode;
   valorMonto: number;
+  montoOriginal?: number;
   tasaRendimientoOInteres?: number;
   fechaValoracion: string;
   esLiquidezInmediata: boolean;
