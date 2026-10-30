@@ -13,8 +13,10 @@ export const Login: React.FC = () => {
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err: unknown) {
-      console.error('Error de autenticación con Google');
-      setError('No se pudo iniciar sesión con Google. Por favor, inténtalo de nuevo.');
+      console.error('Error de autenticación con Google:', err);
+      const firebaseErr = err as { code?: string; message?: string };
+      const detail = firebaseErr?.code ? ` (${firebaseErr.code})` : '';
+      setError(`No se pudo iniciar sesión con Google${detail}. Por favor, inténtalo de nuevo.`);
     } finally {
       setIsLoading(false);
     }

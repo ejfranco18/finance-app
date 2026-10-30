@@ -6,8 +6,7 @@ import {
   AssetLiabilityFormModal,
   PeriodConfigFormModal,
   AccountFormModal,
-  InitialTransactionDraft,
-  EditablePatrimonyItem,
+  StockHoldingFormModal,
 } from './FinanceForms';
 import { AIAssistantModal } from './AIAssistantModal';
 import {
@@ -24,10 +23,6 @@ import {
   Trash2,
   Pencil,
   TrendingUp,
-  AlertTriangle,
-  CheckCircle2,
-  Sparkles,
-  X,
 } from 'lucide-react';
 import styles from './Canvas.module.css';
 
@@ -108,18 +103,21 @@ interface NetWorthRecord {
 }
 
 interface PortfolioRecord {
+  id: string;
   account_id: string;
   account_name: string;
   ticker: string;
   security_name: string;
   shares: string;
   average_buy_price: string;
+  purchase_date?: string;
   current_price: string;
   total_cost_basis: string;
   current_market_value: string;
   unrealized_pnl: string;
   pnl_percentage: string;
   currency: string;
+  last_price_update?: string;
 }
 
 interface TaxonomySubcategoryRecord {
@@ -294,6 +292,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const [payTcOriginAccountId, setPayTcOriginAccountId] = useState<string>('');
   const [isPayingTc, setIsPayingTc] = useState<boolean>(false);
 
+  // Stock Holdings (Lotes de Acciones) state
+  const [isStockModalOpen, setIsStockModalOpen] = useState(false);
+  const [editingHolding, setEditingHolding] = useState<PortfolioRecord | null>(null);
+  const [confirmDeleteHoldingId, setConfirmDeleteHoldingId] = useState<string | null>(null);
+  const [deletingHoldingId, setDeletingHoldingId] = useState<string | null>(null);
+
   // Modals state
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
@@ -305,20 +309,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
 
-  const handleSaveReconciliation = async (
-    accountId: string,
-    bankBalanceValue: number | null | undefined,
-    annualInterestRateValue?: number,
-    initialBalanceValue?: number
-  ) => {
+  const handleDeleteHolding = async (holdingId: string) => {
     try {
-      setIsSavingReconcile(true);
-      setReconcileError(null);
-      setReconcileSavedMsg(null);
+      setDeletingHoldingId(holdingId);
+      setDeleteError(null);
       const token = await auth.currentUser?.getIdToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
+      const headers: Record<string, string> = {};
       if (token) {
         headers.Authorization = `Bearer ${token}`;
       }
@@ -326,50 +322,24 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         headers['x-user-id'] = effectiveUserId;
       }
 
-      const payload: Record<string, unknown> = {};
-      if (bankBalanceValue !== undefined) {
-        payload.reconciledBalance = bankBalanceValue;
-        payload.clear = bankBalanceValue === null;
-      }
-      if (annualInterestRateValue !== undefined) {
-        payload.annualInterestRate = annualInterestRateValue;
-      }
-      if (initialBalanceValue !== undefined) {
-        payload.initialBalance = initialBalanceValue;
-      }
-
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/reconcile`, {
-        method: 'PUT',
+      const res = await fetch(`/api/investments/${encodeURIComponent(holdingId)}`, {
+        method: 'DELETE',
         headers,
-        body: JSON.stringify(payload),
       });
 
-      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(body.error || 'No se pudo actualizar la cuenta.');
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'No se pudo eliminar el lote de acciones.');
       }
 
-      if (bankBalanceValue === null) {
-        setReconcileInputValue('');
-        setReconcileSavedMsg('Validación manual limpiada.');
-      } else if (bankBalanceValue !== undefined) {
-        setReconcileInputValue(String(bankBalanceValue));
-        setReconcileSavedMsg('Saldo de banco guardado.');
-      } else if (initialBalanceValue !== undefined) {
-        setReconcileInitialInputValue(String(initialBalanceValue));
-        setReconcileSavedMsg('Saldo inicial actualizado y saldo de la cuenta recalculado.');
-      } else if (annualInterestRateValue !== undefined) {
-        setReconcileRateInputValue(String(annualInterestRateValue));
-        setReconcileSavedMsg('Tasa de interés anual (E.A.) actualizada.');
-      }
-
+      setConfirmDeleteHoldingId(null);
       await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
     } catch (err) {
-      setReconcileError(
-        err instanceof Error ? err.message : 'Error inesperado al actualizar la cuenta.'
+      setDeleteError(
+        err instanceof Error ? err.message : 'Error inesperado al eliminar el lote de acciones.'
       );
     } finally {
-      setIsSavingReconcile(false);
+      setDeletingHoldingId(null);
     }
   };
 
@@ -677,10 +647,18 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     (sum, item) => sum + Number(item.current_market_value || 0),
     0
   );
-  const totalSavingsUsd = usdSavingsAccounts.reduce(
-    (sum, acc) => sum + Number(acc.current_balance || 0),
+  const totalPortfolioCostUsd = portfolio.reduce(
+    (sum, item) => sum + Number(item.total_cost_basis || 0),
     0
   );
+  const totalPortfolioPnlUsd = totalPortfolioUsd - totalPortfolioCostUsd;
+  const totalPortfolioPnlPct =
+    totalPortfolioCostUsd > 0
+      ? Number(((totalPortfolioPnlUsd / totalPortfolioCostUsd) * 100).toFixed(2))
+      : 0;
+  const totalSavingsUsd = usdAccounts
+    .filter((acc) => acc.type.toLowerCase() === 'ahorro')
+    .reduce((sum, acc) => sum + Number(acc.current_balance || 0), 0);
 
   const totalConsolidatedSavingsCop =
     totalImmediateLiquidityCop +
@@ -786,8 +764,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     ? allTransactions.filter((tx) => tx.month === selectedFlowMonth)
     : [];
 
+  const uniquePortfolioTickers = Array.from(new Set(portfolio.map((p) => p.ticker)));
   const portfolioTickersLabel =
-    portfolio.length > 0 ? portfolio.map((p) => p.ticker).join(', ') : 'Sin posiciones';
+    uniquePortfolioTickers.length > 0 ? uniquePortfolioTickers.join(', ') : 'Sin posiciones';
   const usdAccountNamesLabel =
     usdAccounts.length > 0 ? usdAccounts.map((a) => a.name).join(', ') : 'Sin cuentas USD';
 
@@ -871,6 +850,14 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
         editingItem={editingPatrimonyItem}
         existingAssets={editableAssets}
         existingLiabilities={editableLiabilities}
+      />
+      <StockHoldingFormModal
+        isOpen={isStockModalOpen}
+        onClose={() => {
+          setIsStockModalOpen(false);
+          setEditingHolding(null);
+        }}
+        editingHolding={editingHolding}
       />
       <PeriodConfigFormModal
         isOpen={isPeriodModalOpen}
@@ -1580,11 +1567,16 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
 
           <button
             onClick={() => {
-              setEditingPatrimonyItem(null);
-              setIsAssetModalOpen(true);
+              setEditingHolding(null);
+              setIsStockModalOpen(true);
             }}
             className={styles.secondaryCyanBtn}
           >
+            <TrendingUp className={styles.btnIcon} />
+            <span>+ Acción / ETF</span>
+          </button>
+
+          <button onClick={() => setIsAssetModalOpen(true)} className={styles.secondaryCyanBtn}>
             <Building className={styles.btnIcon} />
             <span>+ Activo / Deuda</span>
           </button>
@@ -2275,115 +2267,170 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                 </div>
               </div>
 
-              {portfolio.length > 0 && isPortfolioExpanded && (() => {
-                const totalCostBasisUsd = portfolio.reduce(
-                  (sum, p) => sum + Number(p.total_cost_basis || 0),
-                  0
-                );
-                const totalUnrealizedPnlUsd = portfolio.reduce(
-                  (sum, p) => sum + Number(p.unrealized_pnl || 0),
-                  0
-                );
-                const totalPnlPct =
-                  totalCostBasisUsd > 0
-                    ? Number(((totalUnrealizedPnlUsd / totalCostBasisUsd) * 100).toFixed(2))
-                    : 0;
-
-                return (
-                  <div className={styles.portfolioLotsBlock}>
-                    <div className={styles.portfolioHeaderBar}>
-                      <div>
-                        <h3 className={styles.taxonomyTitle} style={{ fontSize: '0.95rem' }}>
-                          Detalle de Portafolio de Acciones & ETFs ({portfolio.length}{' '}
-                          {portfolio.length === 1 ? 'posición' : 'posiciones'})
-                        </h3>
-                        <p className={styles.taxonomySubtitle}>
-                          Precios actualizados desde Yahoo Finance · Costo Base:{' '}
-                          <strong>{formatCurrencyUSD(totalCostBasisUsd)}</strong> · Valor Actual:{' '}
-                          <strong>{formatCurrencyUSD(totalPortfolioUsd)}</strong>
-                        </p>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span
-                          className={
-                            totalUnrealizedPnlUsd >= 0
-                              ? styles.txTypeBadgeEmerald
-                              : styles.txTypeBadgeRose
-                          }
-                        >
-                          PnL Total: {totalUnrealizedPnlUsd >= 0 ? '+' : '-'}
-                          {formatCurrencyUSD(Math.abs(totalUnrealizedPnlUsd))} (
-                          {totalPnlPct >= 0 ? '+' : ''}
-                          {totalPnlPct}%)
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className={styles.tableWrapper}>
-                      <table className={styles.table}>
-                        <thead className={styles.tableHead}>
-                          <tr>
-                            <th className={styles.th}>Ticker / Activo</th>
-                            <th className={styles.thRight}>Acciones (Shares)</th>
-                            <th className={styles.thRight}>Precio Compra Prom.</th>
-                            <th className={styles.thRight}>Precio Actual</th>
-                            <th className={styles.thRight}>Costo Invertido</th>
-                            <th className={styles.thRight}>Valor Actual (USD / COP)</th>
-                            <th className={styles.thRight}>Ganancia / Pérdida</th>
-                          </tr>
-                        </thead>
-                        <tbody className={styles.tableBody}>
-                          {portfolio.map((item) => {
-                            const shares = Number(item.shares || 0);
-                            const avgBuy = Number(item.average_buy_price || 0);
-                            const currentPrice = Number(item.current_price || 0);
-                            const costBasis = Number(item.total_cost_basis || 0);
-                            const marketVal = Number(item.current_market_value || 0);
-                            const pnl = Number(item.unrealized_pnl || 0);
-                            const pnlPct = Number(item.pnl_percentage || 0);
-                            const isPositive = pnl >= 0;
-
-                            return (
-                              <tr key={`${item.account_id}-${item.ticker}`} className={styles.tr}>
-                                <td className={styles.tdCategory}>
-                                  <span className={styles.txCategoryMain}>{item.ticker}</span>
-                                  <span className={styles.txSubcategoryMuted}>
-                                    {' '}
-                                    · {item.security_name}
-                                  </span>
-                                </td>
-                                <td className={styles.tdBalance}>{shares.toFixed(4)}</td>
-                                <td className={styles.tdBalance}>{formatCurrencyUSD(avgBuy)}</td>
-                                <td className={styles.tdAccumulated}>
-                                  {formatCurrencyUSD(currentPrice)}
-                                </td>
-                                <td className={styles.tdBalance}>{formatCurrencyUSD(costBasis)}</td>
-                                <td className={styles.tdSavings}>
-                                  <div>{formatCurrencyUSD(marketVal)}</div>
-                                  <div
-                                    style={{
-                                      fontSize: '10px',
-                                      color: '#94a3b8',
-                                      fontWeight: 400,
-                                    }}
-                                  >
-                                    ≈ {formatCurrencyCOP(marketVal * trm)}
-                                  </div>
-                                </td>
-                                <td className={isPositive ? styles.tdIncome : styles.tdExpense}>
-                                  {isPositive ? '+' : '-'}
-                                  {formatCurrencyUSD(Math.abs(pnl))} ({isPositive ? '+' : ''}
-                                  {pnlPct.toFixed(2)}%)
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+              {/* DESGLOSE DE LOTES DE ACCIONES / ETFs (v_portfolio_summary) */}
+              <div className={styles.portfolioLotsBlock}>
+                <div className={styles.portfolioHeaderBar}>
+                  <div>
+                    <h3 className={styles.taxonomyTitle}>
+                      Portafolio de Acciones & ETFs · Lotes de Compra ({portfolio.length}{' '}
+                      {portfolio.length === 1 ? 'registro' : 'registros'})
+                    </h3>
+                    <p className={styles.taxonomySubtitle}>
+                      Costo Invertido:{' '}
+                      <strong className={styles.monoCyan}>
+                        {formatCurrencyUSD(totalPortfolioCostUsd)}
+                      </strong>{' '}
+                      · Valor Hoy:{' '}
+                      <strong className={styles.monoEmerald}>
+                        {formatCurrencyUSD(totalPortfolioUsd)}
+                      </strong>{' '}
+                      · Ganancia/Pérdida:{' '}
+                      <strong
+                        className={
+                          totalPortfolioPnlUsd >= 0 ? styles.monoEmerald : styles.monoRose
+                        }
+                      >
+                        {totalPortfolioPnlUsd >= 0 ? '+' : '-'}
+                        {formatCurrencyUSD(Math.abs(totalPortfolioPnlUsd))} (
+                        {totalPortfolioPnlUsd >= 0 ? '+' : ''}
+                        {totalPortfolioPnlPct}%)
+                      </strong>
+                    </p>
                   </div>
-                );
-              })()}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingHolding(null);
+                      setIsStockModalOpen(true);
+                    }}
+                    className={styles.secondaryCyanBtn}
+                  >
+                    <Plus className={styles.btnIcon} />
+                    <span>+ Registrar Compra de Acción</span>
+                  </button>
+                </div>
+
+                {deleteError && (
+                  <div className={styles.errorCard}>
+                    <span>{deleteError}</span>
+                  </div>
+                )}
+
+                {portfolio.length === 0 ? (
+                  <div className={styles.stateCard}>
+                    No tienes compras de acciones registradas aún. Usa el botón "+ Registrar Compra
+                    de Acción" para agregar tu primer lote.
+                  </div>
+                ) : (
+                  <div className={styles.tableWrapper}>
+                    <table className={styles.table}>
+                      <thead className={styles.tableHead}>
+                        <tr>
+                          <th className={styles.th}>Fecha Compra</th>
+                          <th className={styles.th}>Acción / ETF</th>
+                          <th className={styles.thRight}>Shares</th>
+                          <th className={styles.thRight}>Precio Compra</th>
+                          <th className={styles.thRight}>Precio Hoy</th>
+                          <th className={styles.thRight}>Invertido</th>
+                          <th className={styles.thRight}>Valor Hoy</th>
+                          <th className={styles.thRight}>Ganancia / Pérdida</th>
+                          <th className={styles.thRight}>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody className={styles.tableBody}>
+                        {portfolio.map((lot) => {
+                          const sharesNum = Number(lot.shares || 0);
+                          const buyPriceNum = Number(lot.average_buy_price || 0);
+                          const currentPriceNum = Number(lot.current_price || 0);
+                          const costBasisNum = Number(lot.total_cost_basis || 0);
+                          const marketValNum = Number(lot.current_market_value || 0);
+                          const pnlNum = Number(lot.unrealized_pnl || 0);
+                          const pnlPctNum = Number(lot.pnl_percentage || 0);
+                          const isPositive = pnlNum >= 0;
+                          const isConfirming = confirmDeleteHoldingId === lot.id;
+                          const isDeleting = deletingHoldingId === lot.id;
+                          const fmtMoney =
+                            lot.currency === 'COP' ? formatCurrencyCOP : formatCurrencyUSD;
+
+                          return (
+                            <tr key={lot.id} className={styles.tr}>
+                              <td className={styles.tdDate}>{lot.purchase_date || '—'}</td>
+                              <td className={styles.tdCategory}>
+                                <span className={styles.txCategoryMain}>{lot.ticker}</span>
+                                <span className={styles.txSubcategoryMuted}>
+                                  {' '}
+                                  · {lot.security_name}
+                                </span>
+                              </td>
+                              <td className={styles.tdRate}>
+                                {sharesNum.toLocaleString('es-CO', {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 6,
+                                })}
+                              </td>
+                              <td className={styles.tdRate}>{fmtMoney(buyPriceNum)}</td>
+                              <td className={styles.tdAccumulated}>{fmtMoney(currentPriceNum)}</td>
+                              <td className={styles.tdRate}>{fmtMoney(costBasisNum)}</td>
+                              <td className={styles.tdBalance}>{fmtMoney(marketValNum)}</td>
+                              <td className={isPositive ? styles.tdIncome : styles.tdExpense}>
+                                {isPositive ? '+' : '-'}
+                                {fmtMoney(Math.abs(pnlNum))} ({isPositive ? '+' : ''}
+                                {pnlPctNum.toFixed(2)}%)
+                              </td>
+                              <td className={styles.tdAction}>
+                                {isConfirming ? (
+                                  <div className={styles.confirmActionGroup}>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => handleDeleteHolding(lot.id)}
+                                      className={styles.confirmDeleteBtn}
+                                    >
+                                      {isDeleting ? 'Eliminando...' : 'Confirmar'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isDeleting}
+                                      onClick={() => setConfirmDeleteHoldingId(null)}
+                                      className={styles.cancelDeleteBtn}
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className={styles.actionBtnGroup}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingHolding(lot);
+                                        setIsStockModalOpen(true);
+                                      }}
+                                      className={styles.editTxBtn}
+                                      title="Editar este lote de compra"
+                                    >
+                                      <Pencil className={styles.deleteIcon} />
+                                      <span>Editar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteHoldingId(lot.id)}
+                                      className={styles.deleteTxBtn}
+                                      title="Eliminar este lote de compra"
+                                    >
+                                      <Trash2 className={styles.deleteIcon} />
+                                      <span>Eliminar</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* 4. RESUMEN PATRIMONIAL */}
