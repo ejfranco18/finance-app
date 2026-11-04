@@ -369,6 +369,7 @@ export interface SuggestedTransactionDraft {
   tipo: 'gasto' | 'ingreso' | 'ahorro_inversion' | 'transferencia';
   monto: number;
   moneda: 'COP' | 'USD';
+  fecha?: string;
   cuentaOrigenId?: string;
   cuentaOrigenNombre?: string;
   categoriaMacroId: string;
@@ -529,19 +530,27 @@ REGLAS DE RESPUESTA:
 3. Recuerda las reglas contables de la app:
    - Las cuentas Nu ('Nu', 'Nu Meridiano', 'Nu ahorros') capitalizan interés compuesto diario al 9.35% E.A. después de medianoche.
    - Una compra con Tarjeta de Crédito se registra como GASTO en la cuenta tipo 'Tarjeta de crédito' (dejando su saldo negativo como deuda). El pago de la tarjeta se registra como TRANSFERENCIA desde la cuenta bancaria hacia la tarjeta para no duplicar gastos.
-4. Si el usuario te pide registrar, anotar o crear un movimiento/gasto/ingreso (ej. "Regístrame un gasto de 45 mil de almuerzo con Nu"), además de tu respuesta amable, incluye AL FINAL de tu mensaje un bloque JSON exactamente con la etiqueta \`\`\`transaction_draft ... \`\`\` mapeado a una de las cuentas y subcategorías oficiales del usuario:
+4. Si el usuario te pide registrar, anotar o crear uno o varios movimientos/gastos/ingresos, además de tu respuesta amable, incluye AL FINAL de tu mensaje un bloque JSON exactamente con la etiqueta \`\`\`transaction_draft ... \`\`\` mapeado a las cuentas y subcategorías oficiales del usuario:
+   - Si es UN SOLO movimiento, puedes devolver un objeto JSON o un arreglo JSON con 1 elemento.
+   - Si el usuario pide registrar VARIOS movimientos en el mismo mensaje, DEBES devolver un ARREGLO JSON \`[ { ... }, { ... } ]\` dentro de un único bloque \`\`\`transaction_draft ... \`\`\` con TODOS los movimientos solicitados, sin omitir ninguno.
+   - Incluye siempre el campo \`"fecha"\` en formato \`"YYYY-MM-DD"\`. Si el usuario indica una fecha para cada movimiento (ej. "31 de octubre", "1 de noviembre", "2 de noviembre", "ayer"), calcula la fecha exacta en formato \`YYYY-MM-DD\` tomando como referencia la fecha actual en Colombia (${todayBogota}). Si no menciona fecha, usa \`"${todayBogota}"\`.
+   - En pesos colombianos (COP), cuando el usuario escribe un punto seguido de 3 dígitos (ej. "122.452 pesos" o "58.450"), ese punto es separador de miles: escribe siempre el número entero completo en el JSON (\`122452\`, \`58450\`), NUNCA como decimal (\`122.452\`).
+   - Si el usuario escribe el nombre de una cuenta con algún error tipográfico (ej. "TC bando de bogota"), mapéalo al nombre exacto de su cuenta activa en \`accounts\` (ej. "TC Banco de Bogota").
 \`\`\`transaction_draft
-{
-  "tipo": "gasto",
-  "monto": 45000,
-  "moneda": "COP",
-  "cuentaOrigenNombre": "Nu",
-  "categoriaMacroId": "Alimentación",
-  "subcategoria": "Restaurante",
-  "descripcion": "Almuerzo"
-}
+[
+  {
+    "tipo": "gasto",
+    "fecha": "${todayBogota}",
+    "monto": 45000,
+    "moneda": "COP",
+    "cuentaOrigenNombre": "Nu",
+    "categoriaMacroId": "Alimentación",
+    "subcategoria": "Restaurante",
+    "descripcion": "Almuerzo"
+  }
+]
 \`\`\`
-(Solo incluye el bloque \`\`\`transaction_draft\`\`\` cuando el usuario explícitamente quiera registrar o preparar una transacción nueva).
+(Solo incluye el bloque \`\`\`transaction_draft\`\`\` cuando el usuario explícitamente quiera registrar o preparar una o más transacciones nuevas).
 
 === CONTEXTO EN VIVO DE LA BASE DE DATOS (NEON POSTGRESQL) ===
 
@@ -805,53 +814,193 @@ export async function callAgnosticLLM(params: {
 }
 
 /**
- * Extrae un bloque opcional ```transaction_draft ... ``` de la respuesta del modelo.
+ * Normaliza un texto eliminando tildes y pasándolo a minúsculas para comparar nombres de cuentas.
+ */
+function normalizeAccountText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+/**
+ * Busca la cuenta del usuario por nombre exacto o coincidencia tolerante a errores tipográficos (ej. "TC bando de bogota" -> "TC Banco de Bogota").
+ */
+function findMatchingAccount(
+  rawAccountName: string | undefined,
+  accounts: Array<{ id: string; name: string }>
+): { id: string; name: string } | undefined {
+  if (!rawAccountName || !rawAccountName.trim()) return undefined;
+  const target = normalizeAccountText(rawAccountName);
+  if (!target) return undefined;
+
+  // 1. Coincidencia exacta normalizada
+  const exact = accounts.find((a) => normalizeAccountText(a.name) === target);
+  if (exact) return exact;
+
+  // 2. Coincidencia por tokens (tolerante a typos en una palabra como "bando" vs "banco")
+  const stopWords = new Set(['de', 'del', 'la', 'el', 'cuenta', 'tarjeta']);
+  const targetTokens = target
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2 && !stopWords.has(t));
+
+  if (targetTokens.length === 0) return undefined;
+
+  let bestAccount: { id: string; name: string } | undefined;
+  let bestScore = 0;
+
+  for (const acc of accounts) {
+    const accNorm = normalizeAccountText(acc.name);
+    const accTokens = accNorm
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2 && !stopWords.has(t));
+    if (accTokens.length === 0) continue;
+
+    let matchedTokens = 0;
+    for (const tt of targetTokens) {
+      if (accTokens.some((at) => at === tt || (at.length >= 4 && tt.length >= 4 && at.slice(0, 3) === tt.slice(0, 3)))) {
+        matchedTokens += 1;
+      }
+    }
+
+    const score = matchedTokens / Math.max(targetTokens.length, accTokens.length);
+    if (score > bestScore && score >= 0.5) {
+      bestScore = score;
+      bestAccount = acc;
+    }
+  }
+
+  return bestAccount;
+}
+
+/**
+ * Convierte y valida un objeto individual de borrador de transacción proveniente del LLM.
+ */
+function parseSingleTransactionDraft(
+  rawItem: unknown,
+  accounts: Array<{ id: string; name: string }>
+): SuggestedTransactionDraft | null {
+  if (!rawItem || typeof rawItem !== 'object') return null;
+  const item = rawItem as Record<string, unknown>;
+
+  const moneda: 'COP' | 'USD' =
+    String(item.moneda || 'COP').trim().toUpperCase() === 'USD' ? 'USD' : 'COP';
+
+  let monto = 0;
+  if (typeof item.monto === 'string') {
+    const rawStr = item.monto.trim().replace(/[$\s]/g, '');
+    if (moneda === 'COP' && /^\d{1,3}(\.\d{3})+$/.test(rawStr)) {
+      monto = Number(rawStr.replace(/\./g, ''));
+    } else {
+      monto = Number(rawStr.replace(/,/g, ''));
+    }
+  } else if (typeof item.monto === 'number') {
+    monto = item.monto;
+    // Si en COP el modelo escribió 122.452 como decimal JSON en vez de 122452
+    if (
+      moneda === 'COP' &&
+      monto > 0 &&
+      monto < 1000 &&
+      /^\d+\.\d{3}$/.test(String(item.monto))
+    ) {
+      monto = Math.round(monto * 1000);
+    }
+  }
+
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return null;
+  }
+
+  const rawFecha = String(item.fecha || item.date || '').trim();
+  let fecha: string | undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawFecha)) {
+    const parsedDate = new Date(`${rawFecha}T12:00:00Z`);
+    if (!Number.isNaN(parsedDate.getTime())) {
+      fecha = rawFecha;
+    }
+  }
+
+  const rawCuentaNombre =
+    typeof item.cuentaOrigenNombre === 'string' ? item.cuentaOrigenNombre.trim() : undefined;
+  const matchedAccount = findMatchingAccount(rawCuentaNombre, accounts);
+
+  const rawTipo = String(item.tipo || 'gasto').trim().toLowerCase();
+  const tipo: SuggestedTransactionDraft['tipo'] =
+    rawTipo === 'ingreso' ||
+    rawTipo === 'ahorro_inversion' ||
+    rawTipo === 'transferencia'
+      ? rawTipo
+      : 'gasto';
+
+  return {
+    tipo,
+    monto,
+    moneda,
+    ...(fecha ? { fecha } : {}),
+    cuentaOrigenId: matchedAccount?.id,
+    cuentaOrigenNombre: matchedAccount?.name || rawCuentaNombre,
+    categoriaMacroId: String(item.categoriaMacroId || 'Alimentación').trim(),
+    subcategoria: String(item.subcategoria || 'Restaurante').trim(),
+    descripcion: String(item.descripcion || '').trim(),
+  };
+}
+
+/**
+ * Extrae uno o varios borradores de bloques ```transaction_draft ... ``` (soporta objeto único, array JSON o múltiples bloques).
  */
 export function extractTransactionDraft(
   rawReply: string,
   accounts: Array<{ id: string; name: string }>
-): { cleanReply: string; transactionDraft: SuggestedTransactionDraft | null } {
-  const regex = /```transaction_draft\s*([\s\S]*?)```/i;
-  const match = rawReply.match(regex);
-  if (!match) {
-    return { cleanReply: rawReply, transactionDraft: null };
+): {
+  cleanReply: string;
+  transactionDraft: SuggestedTransactionDraft | null;
+  transactionDrafts: SuggestedTransactionDraft[];
+} {
+  const regexGlobal = /```transaction_draft\s*([\s\S]*?)```/gi;
+  const matches = Array.from(rawReply.matchAll(regexGlobal));
+  if (matches.length === 0) {
+    return { cleanReply: rawReply, transactionDraft: null, transactionDrafts: [] };
   }
 
-  const cleanReply = rawReply.replace(regex, '').trim();
-  try {
-    const parsed = JSON.parse(match[1].trim()) as Partial<SuggestedTransactionDraft>;
-    const monto = Number(parsed.monto);
-    if (!Number.isFinite(monto) || monto <= 0) {
-      return { cleanReply, transactionDraft: null };
+  const cleanReply = rawReply.replace(regexGlobal, '').trim();
+  const drafts: SuggestedTransactionDraft[] = [];
+
+  for (const match of matches) {
+    const jsonBlock = (match[1] || '').trim();
+    if (!jsonBlock) continue;
+
+    try {
+      const parsed = JSON.parse(jsonBlock) as unknown;
+      const candidateList: unknown[] = Array.isArray(parsed)
+        ? parsed
+        : parsed &&
+            typeof parsed === 'object' &&
+            Array.isArray((parsed as Record<string, unknown>).transactions)
+          ? ((parsed as Record<string, unknown>).transactions as unknown[])
+          : parsed &&
+              typeof parsed === 'object' &&
+              Array.isArray((parsed as Record<string, unknown>).movimientos)
+            ? ((parsed as Record<string, unknown>).movimientos as unknown[])
+            : [parsed];
+
+      for (const candidate of candidateList) {
+        if (drafts.length >= 25) break;
+        const normalized = parseSingleTransactionDraft(candidate, accounts);
+        if (normalized) {
+          drafts.push(normalized);
+        }
+      }
+    } catch {
+      // Ignorar bloques con JSON malformado
     }
-
-    const matchedAccount = parsed.cuentaOrigenNombre
-      ? accounts.find(
-          (a) => a.name.toLowerCase() === String(parsed.cuentaOrigenNombre).trim().toLowerCase()
-        )
-      : undefined;
-
-    return {
-      cleanReply,
-      transactionDraft: {
-        tipo:
-          parsed.tipo === 'ingreso' ||
-          parsed.tipo === 'ahorro_inversion' ||
-          parsed.tipo === 'transferencia'
-            ? parsed.tipo
-            : 'gasto',
-        monto,
-        moneda: parsed.moneda === 'USD' ? 'USD' : 'COP',
-        cuentaOrigenId: matchedAccount?.id,
-        cuentaOrigenNombre: matchedAccount?.name || parsed.cuentaOrigenNombre,
-        categoriaMacroId: String(parsed.categoriaMacroId || 'Alimentación'),
-        subcategoria: String(parsed.subcategoria || 'Restaurante'),
-        descripcion: String(parsed.descripcion || ''),
-      },
-    };
-  } catch {
-    return { cleanReply, transactionDraft: null };
   }
+
+  return {
+    cleanReply,
+    transactionDraft: drafts[0] || null,
+    transactionDrafts: drafts,
+  };
 }
 
 /**
@@ -934,7 +1083,10 @@ export async function chatWithFinancialAi(req: Request, res: Response) {
       userMessage: message,
     });
 
-    const { cleanReply, transactionDraft } = extractTransactionDraft(rawReply, accounts);
+    const { cleanReply, transactionDraft, transactionDrafts } = extractTransactionDraft(
+      rawReply,
+      accounts
+    );
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
@@ -942,6 +1094,7 @@ export async function chatWithFinancialAi(req: Request, res: Response) {
       provider,
       model,
       transactionDraft,
+      transactionDrafts,
     });
   } catch (error) {
     console.error('Error en consulta al Copiloto Financiero IA:', error);

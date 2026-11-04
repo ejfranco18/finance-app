@@ -159,6 +159,7 @@ async function executeAutoTransactionFromDraft(
   draft: SuggestedTransactionDraft
 ): Promise<{
   transactionId: string;
+  date: string;
   accountName: string;
   newBalance: number;
   currency: string;
@@ -180,6 +181,9 @@ async function executeAutoTransactionFromDraft(
   const todayBogota = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Bogota',
   }).format(new Date());
+
+  const effectiveDate =
+    draft.fecha && /^\d{4}-\d{2}-\d{2}$/.test(draft.fecha) ? draft.fecha : todayBogota;
 
   return withTransaction(async (client) => {
     // 1. Resolver la cuenta del usuario (por ID, por nombre sugerido o primera cuenta en esa moneda)
@@ -243,7 +247,7 @@ async function executeAutoTransactionFromDraft(
         userId,
         accountRow.id,
         categoryId,
-        todayBogota,
+        effectiveDate,
         draft.monto,
         accountRow.currency,
         dbCategoryType,
@@ -271,6 +275,7 @@ async function executeAutoTransactionFromDraft(
 
     return {
       transactionId,
+      date: effectiveDate,
       accountName: accountRow.name,
       newBalance: Number(updateAcc.rows[0]?.current_balance || 0),
       currency: accountRow.currency,
@@ -496,7 +501,7 @@ async function processTelegramUpdateForUser(
         '🎙️ Una nota de voz: "Pagué 45 mil de almuerzo con la cuenta Nu"\n' +
         '📸 Una foto de una factura o comprobante de transferencia\n' +
         '💬 Cualquier pregunta: "¿Cuánto he gastado en restaurantes este mes o cuánto tengo en Nu?"\n\n' +
-        'Cuando me dictes o escribas un gasto o ingreso, lo registraré automáticamente en Neon DB y te daré un botón por si quieres deshacerlo.',
+        'Cuando me dictes o escribas uno o varios gastos o ingresos (incluso con sus fechas), los registraré automáticamente en Neon DB y te daré botones por si quieres deshacer alguno.',
     });
     return;
   }
@@ -530,7 +535,7 @@ async function processTelegramUpdateForUser(
       );
       effectivePrompt =
         rawText ||
-        'Escucha esta nota de voz del usuario. Si menciona que hizo un gasto, compra, pago o recibió un ingreso, extráelo con el bloque ```transaction_draft``` para registrarlo en la base de datos y confirma los detalles en español. Si hace una pregunta sobre sus finanzas, respóndela con precisión usando el contexto de Neon PostgreSQL.';
+        'Escucha esta nota de voz del usuario. Si menciona que hizo uno o varios gastos, compras, pagos o recibió ingresos, extráelos todos en un arreglo JSON dentro del bloque ```transaction_draft``` (incluyendo la fecha "YYYY-MM-DD" de cada uno) para registrarlos en la base de datos y confirma los detalles en español. Si hace una pregunta sobre sus finanzas, respóndela con precisión usando el contexto de Neon PostgreSQL.';
     } else if (msg.audio?.file_id) {
       media = await downloadTelegramMedia(
         botToken,
@@ -539,13 +544,13 @@ async function processTelegramUpdateForUser(
       );
       effectivePrompt =
         rawText ||
-        'Escucha este audio del usuario. Si menciona un movimiento financiero (gasto/ingreso), genera el bloque ```transaction_draft``` para registrarlo. Si es una consulta, respóndela con los datos de Neon DB.';
+        'Escucha este audio del usuario. Si menciona uno o varios movimientos financieros (gastos/ingresos), genera el bloque ```transaction_draft``` con todos ellos (y sus fechas "YYYY-MM-DD") para registrarlos. Si es una consulta, respóndela con los datos de Neon DB.';
     } else if (Array.isArray(msg.photo) && msg.photo.length > 0) {
       const largestPhoto = msg.photo[msg.photo.length - 1];
       media = await downloadTelegramMedia(botToken, largestPhoto.file_id, 'image/jpeg');
       effectivePrompt =
         rawText ||
-        'Analiza esta imagen (recibo, factura o comprobante de transferencia). Extrae el monto, comercio/descripción y categoría, y genera el bloque ```transaction_draft``` para registrarlo en Neon DB.';
+        'Analiza esta imagen (recibo, factura o comprobante de transferencia). Extrae la fecha, el monto, comercio/descripción y categoría, y genera el bloque ```transaction_draft``` para registrarlo en Neon DB.';
     }
 
     if (!effectivePrompt && !media) {
@@ -576,35 +581,81 @@ async function processTelegramUpdateForUser(
       media,
     });
 
-    const { cleanReply, transactionDraft } = extractTransactionDraft(rawReply, accounts);
+    const { cleanReply, transactionDrafts } = extractTransactionDraft(rawReply, accounts);
 
-    if (transactionDraft) {
-      const created = await executeAutoTransactionFromDraft(userId, transactionDraft);
+    if (transactionDrafts.length > 0) {
+      const createdItems: Array<{
+        draft: SuggestedTransactionDraft;
+        created: Awaited<ReturnType<typeof executeAutoTransactionFromDraft>>;
+      }> = [];
+
+      for (const draft of transactionDrafts) {
+        const created = await executeAutoTransactionFromDraft(userId, draft);
+        createdItems.push({ draft, created });
+      }
+
       console.log(
-        `[TelegramBot] ✅ Update #${update.update_id} insertó tx=${created.transactionId} ($${transactionDraft.monto} en ${created.accountName}) en ${Date.now() - startMs}ms`
+        `[TelegramBot] ✅ Update #${update.update_id} insertó ${createdItems.length} movimiento(s) en ${Date.now() - startMs}ms`
       );
-      const fullTelegramText =
-        `${cleanReply}\n\n` +
-        `✅ Guardado automáticamente en Neon DB:\n` +
-        `• Tipo: ${created.categoryType}\n` +
-        `• Monto: $${transactionDraft.monto.toLocaleString('es-CO')} ${created.currency}\n` +
-        `• Categoría: ${transactionDraft.categoriaMacroId} → ${transactionDraft.subcategoria}\n` +
-        `• Cuenta: ${created.accountName}\n` +
-        `• Nuevo saldo en ${created.accountName}: $${created.newBalance.toLocaleString('es-CO')} ${created.currency}`;
+
+      let fullTelegramText = '';
+      if (createdItems.length === 1) {
+        const { draft, created } = createdItems[0];
+        fullTelegramText =
+          `${cleanReply}\n\n` +
+          `✅ Guardado automáticamente en Neon DB:\n` +
+          `• Fecha: ${created.date}\n` +
+          `• Tipo: ${created.categoryType}\n` +
+          `• Concepto: ${draft.descripcion || draft.subcategoria}\n` +
+          `• Monto: $${draft.monto.toLocaleString('es-CO')} ${created.currency}\n` +
+          `• Categoría: ${draft.categoriaMacroId} → ${draft.subcategoria}\n` +
+          `• Cuenta: ${created.accountName}\n` +
+          `• Nuevo saldo en ${created.accountName}: $${created.newBalance.toLocaleString('es-CO')} ${created.currency}`;
+      } else {
+        const latestBalanceByAccount = new Map<
+          string,
+          { balance: number; currency: string }
+        >();
+        const itemLines = createdItems.map(({ draft, created }, idx) => {
+          latestBalanceByAccount.set(created.accountName, {
+            balance: created.newBalance,
+            currency: created.currency,
+          });
+          return (
+            `${idx + 1}. [${created.date}] ${draft.descripcion || draft.subcategoria}: ` +
+            `$${draft.monto.toLocaleString('es-CO')} ${created.currency} ` +
+            `(${draft.categoriaMacroId} → ${draft.subcategoria}) · ${created.accountName}`
+          );
+        });
+
+        const balanceLines = Array.from(latestBalanceByAccount.entries()).map(
+          ([accName, info]) =>
+            `• Nuevo saldo en ${accName}: $${info.balance.toLocaleString('es-CO')} ${info.currency}`
+        );
+
+        fullTelegramText =
+          `${cleanReply}\n\n` +
+          `✅ ${createdItems.length} movimientos guardados automáticamente en Neon DB:\n` +
+          `${itemLines.join('\n')}\n\n` +
+          `${balanceLines.join('\n')}`;
+      }
+
+      const inlineKeyboard = createdItems.map(({ draft, created }, idx) => [
+        {
+          text:
+            createdItems.length === 1
+              ? '🗑️ Deshacer este registro'
+              : `🗑️ Deshacer #${idx + 1}: ${(draft.descripcion || draft.subcategoria).slice(0, 18)} ($${draft.monto.toLocaleString('es-CO')})`,
+          callback_data: `undo_tx:${created.transactionId}`,
+        },
+      ]);
 
       await sendTelegramMessage({
         botToken,
         chatId: incomingChatId,
         text: fullTelegramText,
         replyMarkup: {
-          inline_keyboard: [
-            [
-              {
-                text: '🗑️ Deshacer este registro',
-                callback_data: `undo_tx:${created.transactionId}`,
-              },
-            ],
-          ],
+          inline_keyboard: inlineKeyboard,
         },
       });
     } else {
