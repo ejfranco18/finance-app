@@ -253,10 +253,14 @@ export async function deleteTransaction(req: Request, res: Response) {
         amount: string;
         destination_amount: string | null;
         category_type: string;
+        sub_category_name: string | null;
+        description: string | null;
+        currency: string | null;
+        date: string | Date | null;
       }>(
         `DELETE FROM transactions
          WHERE id = $1::uuid AND user_id = $2
-         RETURNING account_id, destination_account_id, amount, destination_amount, category_type`,
+         RETURNING account_id, destination_account_id, amount, destination_amount, category_type, sub_category_name, description, currency, date`,
         [transactionId, userId]
       );
 
@@ -270,20 +274,106 @@ export async function deleteTransaction(req: Request, res: Response) {
         tx.destination_amount !== null && tx.destination_amount !== undefined
           ? Number(tx.destination_amount)
           : amount;
-      const isInflow = tx.category_type === 'INGRESO_FIJO' || tx.category_type === 'INGRESO_VARIABLE';
-      const revertDelta = isInflow ? -amount : amount;
+      const isStockSale = tx.sub_category_name === 'Venta de Acción / ETF';
 
-      await client.query(
-        `UPDATE accounts
-         SET current_balance = current_balance + $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $2::uuid AND user_id = $3`,
-        [revertDelta, tx.account_id, userId]
-      );
+      if (!isStockSale) {
+        const isInflow = tx.category_type === 'INGRESO_FIJO' || tx.category_type === 'INGRESO_VARIABLE';
+        const revertDelta = isInflow ? -amount : amount;
+
+        await client.query(
+          `UPDATE accounts
+           SET current_balance = current_balance + $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2::uuid AND user_id = $3`,
+          [revertDelta, tx.account_id, userId]
+        );
+      } else if (tx.description) {
+        // Si se elimina un movimiento de "Venta de Acción / ETF", restaurar las shares al portafolio
+        const saleMatch = tx.description.match(
+          /Venta\s+(total|parcial)\s+de\s+([0-9.]+)\s+([A-Z0-9.-]+)\s+@\s*\$([0-9.]+)/i
+        );
+        if (saleMatch) {
+          const isPartialSale = saleMatch[1].toLowerCase() === 'parcial';
+          const soldShares = Number(saleMatch[2]);
+          const ticker = saleMatch[3].toUpperCase();
+          const sellPrice = Number(saleMatch[4]);
+
+          const buyMetaMatch = tx.description.match(
+            /Compra:\s*(\d{4}-\d{2}-\d{2})\s*@\s*\$([0-9.]+)/i
+          );
+          const pnlMatch = tx.description.match(/PnL:\s*([+-]?)\s*\$([0-9.]+)/i);
+
+          let restoredBuyDate = buyMetaMatch
+            ? buyMetaMatch[1]
+            : tx.date
+              ? new Date(tx.date).toISOString().slice(0, 10)
+              : new Date().toISOString().slice(0, 10);
+
+          let restoredBuyPrice = buyMetaMatch ? Number(buyMetaMatch[2]) : sellPrice;
+          if (!buyMetaMatch && pnlMatch && soldShares > 0) {
+            const sign = pnlMatch[1] === '-' ? -1 : 1;
+            const realizedPnl = sign * Number(pnlMatch[2]);
+            const estimatedCostBasis = destAmount - realizedPnl;
+            if (estimatedCostBasis > 0) {
+              restoredBuyPrice = Number((estimatedCostBasis / soldShares).toFixed(4));
+            }
+          }
+
+          if (soldShares > 0 && ticker) {
+            if (isPartialSale) {
+              const existingLot = await client.query<{ id: string }>(
+                `SELECT id FROM portfolio_holdings
+                 WHERE user_id = $1 AND account_id = $2::uuid AND ticker = $3
+                 ORDER BY ABS(average_buy_price - $4) ASC, updated_at DESC
+                 LIMIT 1`,
+                [userId, tx.account_id, ticker, restoredBuyPrice]
+              );
+              if (existingLot.rows[0]?.id) {
+                await client.query(
+                  `UPDATE portfolio_holdings
+                   SET shares = shares + $1,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = $2::uuid AND user_id = $3`,
+                  [soldShares, existingLot.rows[0].id, userId]
+                );
+              } else {
+                await client.query(
+                  `INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6::date, $7)`,
+                  [
+                    userId,
+                    tx.account_id,
+                    ticker,
+                    soldShares,
+                    restoredBuyPrice,
+                    restoredBuyDate,
+                    tx.currency || 'USD',
+                  ]
+                );
+              }
+            } else {
+              await client.query(
+                `INSERT INTO portfolio_holdings (user_id, account_id, ticker, shares, average_buy_price, purchase_date, currency)
+                 VALUES ($1, $2::uuid, $3, $4, $5, $6::date, $7)`,
+                [
+                  userId,
+                  tx.account_id,
+                  ticker,
+                  soldShares,
+                  restoredBuyPrice,
+                  restoredBuyDate,
+                  tx.currency || 'USD',
+                ]
+              );
+            }
+          }
+        }
+      }
 
       if (
         tx.destination_account_id &&
-        (tx.category_type === 'TRANSFERENCIA' ||
+        (isStockSale ||
+          tx.category_type === 'TRANSFERENCIA' ||
           tx.category_type === 'AHORRO' ||
           tx.category_type === 'INVERSION')
       ) {

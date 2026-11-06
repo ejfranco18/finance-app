@@ -204,6 +204,7 @@ export interface AccountOption {
   name: string;
   type: string;
   currency: string;
+  current_balance?: string | number;
 }
 
 export interface EditableTransaction {
@@ -2344,6 +2345,7 @@ export interface EditableStockHolding {
   security_name: string;
   shares: string;
   average_buy_price: string;
+  current_price?: string | number;
   purchase_date?: string;
   currency: string;
 }
@@ -2352,15 +2354,20 @@ interface StockHoldingFormProps {
   isOpen: boolean;
   onClose: () => void;
   editingHolding?: EditableStockHolding | null;
+  accounts?: AccountOption[];
 }
 
 export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
   isOpen,
   onClose,
   editingHolding = null,
+  accounts = [],
 }) => {
   const queryClient = useQueryClient();
   const isEditMode = Boolean(editingHolding?.id);
+
+  const brokerAccount = accounts.find((a) => a.type.toLowerCase() === 'broker');
+  const brokerAvailableUsd = Number(brokerAccount?.current_balance || 0);
 
   const [ticker, setTicker] = useState<string>('');
   const [securityName, setSecurityName] = useState<string>('');
@@ -2370,7 +2377,11 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
   const [investedAmount, setInvestedAmount] = useState<string>('');
   const [shares, setShares] = useState<string>('');
   const [buyPrice, setBuyPrice] = useState<string>('');
+  const [brokerFee, setBrokerFee] = useState<string>('0');
+  const [currentPrice, setCurrentPrice] = useState<string>('');
   const [currency, setCurrency] = useState<CurrencyCode>('USD');
+  const [deductFromAccount, setDeductFromAccount] = useState<boolean>(false);
+  const [sharesLockedByUser, setSharesLockedByUser] = useState<boolean>(false);
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -2382,6 +2393,7 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
     if (editingHolding) {
       const sh = Number(editingHolding.shares || 0);
       const bp = Number(editingHolding.average_buy_price || 0);
+      const cp = Number(editingHolding.current_price || 0);
       setTicker(editingHolding.ticker || '');
       setSecurityName(editingHolding.security_name || '');
       setPurchaseDate(
@@ -2391,8 +2403,12 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
       );
       setShares(String(sh));
       setBuyPrice(String(bp));
+      setBrokerFee('0');
+      setCurrentPrice(cp > 0 ? String(cp) : '');
       setInvestedAmount(sh > 0 && bp > 0 ? (sh * bp).toFixed(2) : '');
       setCurrency((editingHolding.currency as CurrencyCode) || 'USD');
+      setDeductFromAccount(false);
+      setSharesLockedByUser(true);
     } else {
       setTicker('');
       setSecurityName('');
@@ -2400,26 +2416,44 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
       setInvestedAmount('');
       setShares('');
       setBuyPrice('');
+      setBrokerFee('0');
+      setCurrentPrice('');
       setCurrency('USD');
+      setDeductFromAccount(brokerAvailableUsd > 0);
+      setSharesLockedByUser(false);
     }
-  }, [isOpen, editingHolding]);
+  }, [isOpen, editingHolding, brokerAvailableUsd]);
 
   if (!isOpen) return null;
 
   const numShares = parseFloat(shares);
   const numBuyPrice = parseFloat(buyPrice);
-  const calculatedTotal =
+  const numBrokerFee = parseFloat(brokerFee) > 0 ? parseFloat(brokerFee) : 0;
+  const numCurrentPrice = parseFloat(currentPrice);
+
+  const baseOrderTotal =
     Number.isFinite(numShares) && numShares > 0 && Number.isFinite(numBuyPrice) && numBuyPrice > 0
       ? numShares * numBuyPrice
       : 0;
+  const calculatedTotal = baseOrderTotal > 0 ? baseOrderTotal + numBrokerFee : 0;
+  const effectiveBuyPriceWithFee =
+    Number.isFinite(numShares) && numShares > 0 && calculatedTotal > 0
+      ? calculatedTotal / numShares
+      : numBuyPrice;
 
   const handleInvestedAmountChange = (val: string) => {
     setInvestedAmount(val);
     const amt = parseFloat(val);
     const bp = parseFloat(buyPrice);
-    if (Number.isFinite(amt) && amt > 0 && Number.isFinite(bp) && bp > 0) {
-      setShares((amt / bp).toFixed(8));
-      if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+    const sh = parseFloat(shares);
+    if (Number.isFinite(amt) && amt > 0) {
+      if (Number.isFinite(bp) && bp > 0 && !sharesLockedByUser) {
+        setShares((amt / bp).toFixed(8));
+        if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+      } else if (Number.isFinite(sh) && sh > 0) {
+        setBuyPrice((amt / sh).toFixed(6));
+        if (errors.buyPrice) setErrors((prev) => ({ ...prev, buyPrice: '' }));
+      }
     }
   };
 
@@ -2428,19 +2462,31 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
     if (errors.buyPrice) setErrors((prev) => ({ ...prev, buyPrice: '' }));
     const bp = parseFloat(val);
     const amt = parseFloat(investedAmount);
-    if (Number.isFinite(amt) && amt > 0 && Number.isFinite(bp) && bp > 0) {
-      setShares((amt / bp).toFixed(8));
-      if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+    const sh = parseFloat(shares);
+    if (Number.isFinite(bp) && bp > 0) {
+      if (sharesLockedByUser && Number.isFinite(sh) && sh > 0) {
+        setInvestedAmount((sh * bp).toFixed(2));
+      } else if (Number.isFinite(amt) && amt > 0) {
+        setShares((amt / bp).toFixed(8));
+        if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
+      }
     }
   };
 
   const handleSharesChange = (val: string) => {
     setShares(val);
+    setSharesLockedByUser(Boolean(val && parseFloat(val) > 0));
     if (errors.shares) setErrors((prev) => ({ ...prev, shares: '' }));
     const sh = parseFloat(val);
     const bp = parseFloat(buyPrice);
-    if (Number.isFinite(sh) && sh > 0 && Number.isFinite(bp) && bp > 0) {
-      setInvestedAmount((sh * bp).toFixed(2));
+    const amt = parseFloat(investedAmount);
+    if (Number.isFinite(sh) && sh > 0) {
+      if (Number.isFinite(bp) && bp > 0) {
+        setInvestedAmount((sh * bp).toFixed(2));
+      } else if (Number.isFinite(amt) && amt > 0) {
+        setBuyPrice((amt / sh).toFixed(6));
+        if (errors.buyPrice) setErrors((prev) => ({ ...prev, buyPrice: '' }));
+      }
     }
   };
 
@@ -2477,17 +2523,25 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
           : '/api/investments/buy';
       const method = isEditMode ? 'PUT' : 'POST';
 
+      const finalUnitBuyPrice =
+        numBrokerFee > 0 && numShares > 0
+          ? Number(((numShares * numBuyPrice + numBrokerFee) / numShares).toFixed(6))
+          : numBuyPrice;
+
       const response = await fetch(endpoint, {
         method,
         headers,
         body: JSON.stringify({
+          accountId: editingHolding?.account_id || brokerAccount?.id || undefined,
           ticker: ticker.trim().toUpperCase(),
           name: securityName.trim() || undefined,
           purchaseDate,
           shares: numShares,
-          buyPrice: numBuyPrice,
+          buyPrice: finalUnitBuyPrice,
+          currentPrice:
+            Number.isFinite(numCurrentPrice) && numCurrentPrice > 0 ? numCurrentPrice : undefined,
           currency,
-          deductFromAccount: false,
+          deductFromAccount: !isEditMode ? deductFromAccount : false,
         }),
       });
 
@@ -2529,7 +2583,7 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
                   : 'Registrar Compra de Acción / ETF'}
               </h2>
               <p className={styles.modalSubtitle}>
-                Ingresa el Monto Invertido y el Precio de la Acción (calcula las Shares automáticamente)
+                Registra o ajusta el precio de compra, comisión (fee) del broker y shares del lote
               </p>
             </div>
           </div>
@@ -2588,7 +2642,7 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
           <div className={styles.gridTwoCols}>
             <div>
               <label htmlFor="stock-invested-amount" className={styles.label}>
-                Monto Invertido ({currency}) <span className={styles.requiredStar}>*</span>
+                Monto Orden ({currency}) <span className={styles.requiredStar}>*</span>
               </label>
               <input
                 id="stock-invested-amount"
@@ -2604,7 +2658,7 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
 
             <div>
               <label htmlFor="stock-buy-price" className={styles.label}>
-                Precio de la Acción en la Compra <span className={styles.requiredStar}>*</span>
+                Precio Unitario de Compra <span className={styles.requiredStar}>*</span>
               </label>
               <input
                 id="stock-buy-price"
@@ -2628,14 +2682,14 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
           <div className={styles.gridTwoCols}>
             <div>
               <label htmlFor="stock-shares" className={styles.label}>
-                Cantidad de Acciones (Shares calculadas) <span className={styles.requiredStar}>*</span>
+                Cantidad de Acciones (Shares) <span className={styles.requiredStar}>*</span>
               </label>
               <input
                 id="stock-shares"
                 type="number"
                 step="any"
                 min="0"
-                placeholder="Se calcula solo (Monto / Precio)"
+                placeholder="Se calcula solo o ingresa tus shares"
                 value={shares}
                 onChange={(e) => handleSharesChange(e.target.value)}
                 aria-invalid={!!errors.shares}
@@ -2646,6 +2700,40 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
                   <AlertCircle className={styles.errorIcon} /> {errors.shares}
                 </p>
               )}
+            </div>
+
+            <div>
+              <label htmlFor="stock-broker-fee" className={styles.label}>
+                Comisión / Fee del Broker ({currency})
+              </label>
+              <input
+                id="stock-broker-fee"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="0.00 (se suma al costo del lote)"
+                value={brokerFee}
+                onChange={(e) => setBrokerFee(e.target.value)}
+                className={styles.inputMonoCyan}
+              />
+            </div>
+          </div>
+
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="stock-current-price" className={styles.label}>
+                Precio Actual en Broker (Opcional)
+              </label>
+              <input
+                id="stock-current-price"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="Vacío = Yahoo Finance automático"
+                value={currentPrice}
+                onChange={(e) => setCurrentPrice(e.target.value)}
+                className={styles.inputMonoCyan}
+              />
             </div>
 
             <div>
@@ -2678,11 +2766,55 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
             />
           </div>
 
+          {!isEditMode && brokerAccount && (
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.6rem',
+                padding: '0.65rem 0.85rem',
+                borderRadius: '0.65rem',
+                background: 'rgba(6, 182, 212, 0.08)',
+                border: '1px solid rgba(6, 182, 212, 0.25)',
+                cursor: 'pointer',
+                fontSize: '0.82rem',
+                color: '#e2e8f0',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={deductFromAccount}
+                onChange={(e) => setDeductFromAccount(e.target.checked)}
+              />
+              <span>
+                Descontar compra del <strong>Disponible de Stocks ({brokerAccount.name})</strong> ·
+                Disponible actual:{' '}
+                <strong>
+                  US${' '}
+                  {brokerAvailableUsd.toLocaleString('es-CO', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </strong>
+              </span>
+            </label>
+          )}
+
           {calculatedTotal > 0 && (
             <div className={styles.conversionBanner}>
-              <span>
-                Resumen del Lote ({Number(shares).toFixed(6)} shares × {buyPrice}):
-              </span>
+              <div>
+                <div>
+                  Resumen del Lote ({Number(shares).toFixed(6)} shares ×{' '}
+                  {effectiveBuyPriceWithFee.toFixed(4)} costo unit. efectivo):
+                </div>
+                {numBrokerFee > 0 && (
+                  <div style={{ fontSize: '0.75rem', opacity: 0.8, marginTop: '0.15rem' }}>
+                    Incluye fee de broker de {currency === 'USD' ? 'US$' : '$'}
+                    {numBrokerFee.toFixed(2)} sobre orden de {currency === 'USD' ? 'US$' : '$'}
+                    {baseOrderTotal.toFixed(2)}
+                  </div>
+                )}
+              </div>
               <span className={styles.conversionAmount}>
                 {currency === 'USD' ? 'US$' : '$'}
                 {calculatedTotal.toLocaleString('es-CO', {
@@ -2729,4 +2861,485 @@ export const StockHoldingFormModal: React.FC<StockHoldingFormProps> = ({
     </div>
   );
 };
+
+/* =========================================================================
+   FORMULARIO 6: VENTA DE ACCIÓN / ETF (ACREDITA A DISPONIBLE DE STOCKS)
+   ========================================================================= */
+
+interface SellStockHoldingModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  holding: EditableStockHolding | null;
+  accounts?: AccountOption[];
+}
+
+export const SellStockHoldingModal: React.FC<SellStockHoldingModalProps> = ({
+  isOpen,
+  onClose,
+  holding,
+  accounts = [],
+}) => {
+  const queryClient = useQueryClient();
+
+  const usdAndBrokerAccounts = accounts.filter(
+    (a) => a.currency === 'USD' || a.type.toLowerCase() === 'broker'
+  );
+  const defaultBrokerAccount =
+    usdAndBrokerAccounts.find((a) => a.type.toLowerCase() === 'broker') ||
+    usdAndBrokerAccounts.find((a) => a.id === holding?.account_id) ||
+    usdAndBrokerAccounts[0];
+
+  const [saleDate, setSaleDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [sharesToSell, setSharesToSell] = useState<string>('');
+  const [sellPrice, setSellPrice] = useState<string>('');
+  const [brokerFee, setBrokerFee] = useState<string>('0');
+  const [netProceeds, setNetProceeds] = useState<string>('');
+  const [destinationAccountId, setDestinationAccountId] = useState<string>('');
+  const [creditToAccount, setCreditToAccount] = useState<boolean>(true);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isOpen || !holding) return;
+    setErrors({});
+    const maxSh = Number(holding.shares || 0);
+    const initialSellPrice = Number(holding.current_price || holding.average_buy_price || 0);
+    setSaleDate(new Date().toISOString().split('T')[0]);
+    setSharesToSell(String(maxSh));
+    setSellPrice(initialSellPrice > 0 ? String(initialSellPrice) : '');
+    setBrokerFee('0');
+    setNetProceeds(
+      maxSh > 0 && initialSellPrice > 0 ? (maxSh * initialSellPrice).toFixed(2) : ''
+    );
+    setDestinationAccountId(defaultBrokerAccount?.id || holding.account_id || '');
+    setCreditToAccount(true);
+  }, [isOpen, holding, defaultBrokerAccount?.id]);
+
+  if (!isOpen || !holding) return null;
+
+  const maxShares = Number(holding.shares || 0);
+  const avgBuyPrice = Number(holding.average_buy_price || 0);
+  const numSharesToSell = parseFloat(sharesToSell);
+  const numSellPrice = parseFloat(sellPrice);
+  const numBrokerFee = parseFloat(brokerFee) > 0 ? parseFloat(brokerFee) : 0;
+  const numNetProceeds = parseFloat(netProceeds);
+
+  const proportionalCostBasis =
+    Number.isFinite(numSharesToSell) && numSharesToSell > 0 ? numSharesToSell * avgBuyPrice : 0;
+  const grossProceeds =
+    Number.isFinite(numSharesToSell) &&
+    numSharesToSell > 0 &&
+    Number.isFinite(numSellPrice) &&
+    numSellPrice > 0
+      ? numSharesToSell * numSellPrice
+      : 0;
+  const effectiveNetProceeds =
+    Number.isFinite(numNetProceeds) && numNetProceeds > 0
+      ? numNetProceeds
+      : Math.max(0, grossProceeds - numBrokerFee);
+  const realizedPnl = effectiveNetProceeds - proportionalCostBasis;
+  const realizedPnlPct =
+    proportionalCostBasis > 0 ? (realizedPnl / proportionalCostBasis) * 100 : 0;
+
+  const recalcNetProceeds = (shStr: string, spStr: string, feeStr: string) => {
+    const sh = parseFloat(shStr);
+    const sp = parseFloat(spStr);
+    const fee = parseFloat(feeStr) > 0 ? parseFloat(feeStr) : 0;
+    if (Number.isFinite(sh) && sh > 0 && Number.isFinite(sp) && sp > 0) {
+      const net = Math.max(0, sh * sp - fee);
+      setNetProceeds(net.toFixed(2));
+    }
+  };
+
+  const handleSharesToSellChange = (val: string) => {
+    setSharesToSell(val);
+    if (errors.sharesToSell) setErrors((prev) => ({ ...prev, sharesToSell: '' }));
+    recalcNetProceeds(val, sellPrice, brokerFee);
+  };
+
+  const handleSellPriceChange = (val: string) => {
+    setSellPrice(val);
+    if (errors.sellPrice) setErrors((prev) => ({ ...prev, sellPrice: '' }));
+    recalcNetProceeds(sharesToSell, val, brokerFee);
+  };
+
+  const handleBrokerFeeChange = (val: string) => {
+    setBrokerFee(val);
+    recalcNetProceeds(sharesToSell, sellPrice, val);
+  };
+
+  const handleNetProceedsChange = (val: string) => {
+    setNetProceeds(val);
+    const net = parseFloat(val);
+    const sh = parseFloat(sharesToSell);
+    const fee = parseFloat(brokerFee) > 0 ? parseFloat(brokerFee) : 0;
+    if (Number.isFinite(net) && net > 0 && Number.isFinite(sh) && sh > 0) {
+      setSellPrice(((net + fee) / sh).toFixed(6));
+      if (errors.sellPrice) setErrors((prev) => ({ ...prev, sellPrice: '' }));
+    }
+  };
+
+  const applyPercentageShares = (pct: number) => {
+    const sh = pct >= 1 ? maxShares : Number((maxShares * pct).toFixed(8));
+    const shStr = String(sh);
+    setSharesToSell(shStr);
+    recalcNetProceeds(shStr, sellPrice, brokerFee);
+  };
+
+  const validate = (): boolean => {
+    const newErrors: Record<string, string> = {};
+    if (!saleDate) {
+      newErrors.saleDate = 'La fecha de venta es obligatoria.';
+    }
+    if (!sharesToSell || isNaN(numSharesToSell) || numSharesToSell <= 0) {
+      newErrors.sharesToSell = 'Ingresa una cantidad de acciones a vender mayor a 0.';
+    } else if (numSharesToSell > maxShares + 1e-8) {
+      newErrors.sharesToSell = `No puedes vender más de ${maxShares} shares disponibles en este lote.`;
+    }
+    if (!sellPrice || isNaN(numSellPrice) || numSellPrice <= 0) {
+      newErrors.sellPrice = 'Ingresa un precio unitario de venta mayor a 0.';
+    }
+    if (effectiveNetProceeds <= 0) {
+      newErrors.netProceeds = 'El monto neto recibido debe ser mayor a 0.';
+    }
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
+
+    setIsLoading(true);
+    setErrors({});
+
+    try {
+      const headers = await buildAuthHeaders();
+      const response = await fetch(`/api/investments/${encodeURIComponent(holding.id)}/sell`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          sharesToSell: numSharesToSell,
+          sellPrice: numSellPrice,
+          brokerFee: numBrokerFee,
+          netProceeds: effectiveNetProceeds,
+          saleDate,
+          destinationAccountId: destinationAccountId || undefined,
+          creditToAccount,
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || 'No se pudo registrar la venta de acciones.');
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+      onClose();
+    } catch (err) {
+      setErrors({
+        submit: err instanceof Error ? err.message : 'Error al procesar venta en Neon DB.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className={styles.overlay}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sell-stock-form-title"
+        className={styles.modalCard}
+      >
+        <div className={styles.topGlowCyan} />
+
+        <div className={styles.modalHeader}>
+          <div className={styles.headerLeft}>
+            <div className={styles.iconBoxCyan}>
+              <DollarSign className={styles.headerIcon} />
+            </div>
+            <div>
+              <h2 id="sell-stock-form-title" className={styles.modalTitle}>
+                Vender {holding.ticker} ({holding.security_name || holding.ticker})
+              </h2>
+              <p className={styles.modalSubtitle}>
+                Lote disponible: {maxShares} shares · Costo prom: US$ {avgBuyPrice.toFixed(2)}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Cerrar modal" className={styles.closeBtn}>
+            <X className={styles.closeIcon} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} noValidate className={styles.form}>
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="sell-stock-shares" className={styles.label}>
+                Shares a Vender <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="sell-stock-shares"
+                type="number"
+                step="any"
+                min="0"
+                max={maxShares}
+                value={sharesToSell}
+                onChange={(e) => handleSharesToSellChange(e.target.value)}
+                aria-invalid={!!errors.sharesToSell}
+                className={styles.inputMonoCyan}
+              />
+              <div style={{ display: 'flex', gap: '0.35rem', marginTop: '0.35rem' }}>
+                <button
+                  type="button"
+                  onClick={() => applyPercentageShares(0.25)}
+                  style={{
+                    fontSize: '0.7rem',
+                    padding: '0.15rem 0.45rem',
+                    borderRadius: '0.35rem',
+                    background: 'rgba(148, 163, 184, 0.14)',
+                    border: '1px solid rgba(148, 163, 184, 0.25)',
+                    color: '#cbd5e1',
+                    cursor: 'pointer',
+                  }}
+                >
+                  25%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyPercentageShares(0.5)}
+                  style={{
+                    fontSize: '0.7rem',
+                    padding: '0.15rem 0.45rem',
+                    borderRadius: '0.35rem',
+                    background: 'rgba(148, 163, 184, 0.14)',
+                    border: '1px solid rgba(148, 163, 184, 0.25)',
+                    color: '#cbd5e1',
+                    cursor: 'pointer',
+                  }}
+                >
+                  50%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyPercentageShares(1)}
+                  style={{
+                    fontSize: '0.7rem',
+                    padding: '0.15rem 0.45rem',
+                    borderRadius: '0.35rem',
+                    background: 'rgba(6, 182, 212, 0.18)',
+                    border: '1px solid rgba(6, 182, 212, 0.4)',
+                    color: '#67e8f9',
+                    cursor: 'pointer',
+                  }}
+                >
+                  100% ({maxShares})
+                </button>
+              </div>
+              {errors.sharesToSell && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.sharesToSell}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="sell-stock-date" className={styles.label}>
+                Fecha de Venta <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="sell-stock-date"
+                type="date"
+                value={saleDate}
+                onChange={(e) => {
+                  setSaleDate(e.target.value);
+                  if (errors.saleDate) setErrors((prev) => ({ ...prev, saleDate: '' }));
+                }}
+                className={styles.inputMonoCyan}
+              />
+              {errors.saleDate && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.saleDate}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="sell-stock-price" className={styles.label}>
+                Precio de Venta por Acción (USD) <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="sell-stock-price"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="ej. 350.00"
+                value={sellPrice}
+                onChange={(e) => handleSellPriceChange(e.target.value)}
+                aria-invalid={!!errors.sellPrice}
+                className={styles.inputMonoCyan}
+              />
+              {errors.sellPrice && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.sellPrice}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="sell-stock-fee" className={styles.label}>
+                Comisión / Fee del Broker (USD)
+              </label>
+              <input
+                id="sell-stock-fee"
+                type="number"
+                step="any"
+                min="0"
+                placeholder="0.00"
+                value={brokerFee}
+                onChange={(e) => handleBrokerFeeChange(e.target.value)}
+                className={styles.inputMonoCyan}
+              />
+            </div>
+          </div>
+
+          <div className={styles.gridTwoCols}>
+            <div>
+              <label htmlFor="sell-stock-net" className={styles.label}>
+                Monto Neto Recibido (USD) <span className={styles.requiredStar}>*</span>
+              </label>
+              <input
+                id="sell-stock-net"
+                type="number"
+                step="any"
+                min="0"
+                value={netProceeds}
+                onChange={(e) => handleNetProceedsChange(e.target.value)}
+                className={styles.inputMonoCyan}
+              />
+              {errors.netProceeds && (
+                <p className={styles.errorText}>
+                  <AlertCircle className={styles.errorIcon} /> {errors.netProceeds}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="sell-stock-dest-account" className={styles.label}>
+                Cuenta Destino (Disponible de Stocks / USD)
+              </label>
+              <select
+                id="sell-stock-dest-account"
+                value={destinationAccountId}
+                onChange={(e) => setDestinationAccountId(e.target.value)}
+                className={styles.inputMonoCyan}
+              >
+                {usdAndBrokerAccounts.map((acc) => (
+                  <option key={acc.id} value={acc.id}>
+                    {acc.type.toLowerCase() === 'broker'
+                      ? `${acc.name} (Disponible de Stocks · US$ ${Number(acc.current_balance || 0).toFixed(2)})`
+                      : `${acc.name} (${acc.currency} · US$ ${Number(acc.current_balance || 0).toFixed(2)})`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              padding: '0.65rem 0.85rem',
+              borderRadius: '0.65rem',
+              background: 'rgba(16, 185, 129, 0.08)',
+              border: '1px solid rgba(16, 185, 129, 0.25)',
+              cursor: 'pointer',
+              fontSize: '0.82rem',
+              color: '#e2e8f0',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={creditToAccount}
+              onChange={(e) => setCreditToAccount(e.target.checked)}
+            />
+            <span>
+              Sumar estos <strong>US$ {effectiveNetProceeds.toFixed(2)}</strong> al saldo disponible
+              de la cuenta seleccionada (para recomprar stocks o transferir luego)
+            </span>
+          </label>
+
+          {effectiveNetProceeds > 0 && (
+            <div className={styles.conversionBanner}>
+              <div>
+                <div>
+                  Costo base: US$ {proportionalCostBasis.toFixed(2)} ·{' '}
+                  {numSharesToSell >= maxShares - 1e-8
+                    ? 'Se liquida el 100% del lote'
+                    : `Quedarán ${(maxShares - numSharesToSell).toFixed(6)} shares en el lote`}
+                </div>
+                <div
+                  style={{
+                    fontSize: '0.78rem',
+                    marginTop: '0.2rem',
+                    fontWeight: 600,
+                    color: realizedPnl >= 0 ? '#34d399' : '#f87171',
+                  }}
+                >
+                  Resultado Realizado (PnL): {realizedPnl >= 0 ? '+' : ''}US${' '}
+                  {realizedPnl.toFixed(2)} ({realizedPnl >= 0 ? '+' : ''}
+                  {realizedPnlPct.toFixed(2)}%)
+                </div>
+              </div>
+              <span className={styles.conversionAmount}>
+                +US${' '}
+                {effectiveNetProceeds.toLocaleString('es-CO', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </span>
+            </div>
+          )}
+
+          {errors.submit && (
+            <p className={styles.errorText}>
+              <AlertCircle className={styles.errorIcon} /> {errors.submit}
+            </p>
+          )}
+
+          <div className={styles.footerActions}>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isLoading}
+              className={styles.cancelBtn}
+            >
+              Cancelar
+            </button>
+
+            <button type="submit" disabled={isLoading} className={styles.submitBtnCyan}>
+              {isLoading ? (
+                <>
+                  <Loader2 className={styles.spinnerIcon} />
+                  <span>Procesando Venta...</span>
+                </>
+              ) : (
+                <>
+                  <span>Confirmar Venta</span>
+                  <ArrowRight className={styles.arrowIcon} />
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 

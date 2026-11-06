@@ -7,6 +7,7 @@ import {
   PeriodConfigFormModal,
   AccountFormModal,
   StockHoldingFormModal,
+  SellStockHoldingModal,
   InitialTransactionDraft,
   EditablePatrimonyItem,
 } from './FinanceForms';
@@ -301,6 +302,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   // Stock Holdings (Lotes de Acciones) state
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
   const [editingHolding, setEditingHolding] = useState<PortfolioRecord | null>(null);
+  const [sellingHolding, setSellingHolding] = useState<PortfolioRecord | null>(null);
   const [confirmDeleteHoldingId, setConfirmDeleteHoldingId] = useState<string | null>(null);
   const [deletingHoldingId, setDeletingHoldingId] = useState<string | null>(null);
 
@@ -719,6 +721,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     (sum, acc) => sum + Number(acc.current_balance || 0),
     0
   );
+  const brokerAccount = accounts.find((acc) => acc.type.toLowerCase() === 'broker');
+  const totalBrokerCashUsd = Number(brokerAccount?.current_balance || 0);
   const totalPortfolioUsd = portfolio.reduce(
     (sum, item) => sum + Number(item.current_market_value || 0),
     0
@@ -934,6 +938,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           setEditingHolding(null);
         }}
         editingHolding={editingHolding}
+        accounts={accounts}
+      />
+      <SellStockHoldingModal
+        isOpen={Boolean(sellingHolding)}
+        onClose={() => setSellingHolding(null)}
+        holding={sellingHolding}
+        accounts={accounts}
       />
       <PeriodConfigFormModal
         isOpen={isPeriodModalOpen}
@@ -2324,8 +2335,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                     {formatCurrencyUSD(totalPortfolioUsd)}
                   </div>
                   <div className={styles.cardHintSlate}>
-                    ≈ {formatCurrencyCOP(totalPortfolioUsd * trm)} COP ({portfolioTickersLabel}) ·{' '}
-                    {isPortfolioExpanded ? 'Ocultar detalle' : 'Ver detalle →'}
+                    Disp. en Stocks (Broker):{' '}
+                    <strong className={styles.monoCyan}>
+                      {formatCurrencyUSD(totalBrokerCashUsd)}
+                    </strong>{' '}
+                    · ≈ {formatCurrencyCOP((totalPortfolioUsd + totalBrokerCashUsd) * trm)} COP (
+                    {portfolioTickersLabel})
                   </div>
                 </div>
 
@@ -2379,17 +2394,90 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                       </strong>
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingHolding(null);
-                      setIsStockModalOpen(true);
-                    }}
-                    className={styles.secondaryCyanBtn}
-                  >
-                    <Plus className={styles.btnIcon} />
-                    <span>+ Registrar Compra de Acción</span>
-                  </button>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+                    {brokerAccount && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.55rem',
+                          padding: '0.4rem 0.75rem',
+                          borderRadius: '0.65rem',
+                          background: 'rgba(6, 182, 212, 0.09)',
+                          border: '1px solid rgba(6, 182, 212, 0.28)',
+                          fontSize: '0.78rem',
+                        }}
+                      >
+                        <span style={{ color: '#94a3b8' }}>Disponible de Stocks:</span>
+                        <strong className={styles.monoCyan}>
+                          {formatCurrencyUSD(totalBrokerCashUsd)}
+                        </strong>
+                        <button
+                          type="button"
+                          onClick={() => openAccountReconciliation(brokerAccount.id)}
+                          style={{
+                            padding: '0.2rem 0.5rem',
+                            borderRadius: '0.4rem',
+                            border: '1px solid rgba(148, 163, 184, 0.3)',
+                            background: 'rgba(15, 23, 42, 0.6)',
+                            color: '#cbd5e1',
+                            fontSize: '0.72rem',
+                            cursor: 'pointer',
+                          }}
+                          title="Ver movimientos o conciliar el saldo disponible en el Broker"
+                        >
+                          Detalle / Conciliar
+                        </button>
+                        {totalBrokerCashUsd > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const defaultDestUsd =
+                                usdSavingsAccounts[0]?.id ||
+                                usdLiquidAccounts[0]?.id ||
+                                '';
+                              setEditingTransaction(null);
+                              setTxInitialDraft({
+                                tipo: 'transferencia',
+                                monto: Number(totalBrokerCashUsd.toFixed(2)),
+                                moneda: 'USD',
+                                cuentaOrigenId: brokerAccount.id,
+                                cuentaDestinoId: defaultDestUsd,
+                                categoriaMacroId: 'Transferencia entre cuentas',
+                                subcategoria: 'Retiro de inversión a cuenta',
+                                descripcion: 'Transferencia de Disponible de Stocks a cuenta USD',
+                              });
+                              setIsTxModalOpen(true);
+                            }}
+                            style={{
+                              padding: '0.2rem 0.55rem',
+                              borderRadius: '0.4rem',
+                              border: '1px solid rgba(16, 185, 129, 0.4)',
+                              background: 'rgba(16, 185, 129, 0.14)',
+                              color: '#34d399',
+                              fontSize: '0.72rem',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                            }}
+                            title="Transferir saldo disponible del Broker a Littio, Dollarapp u otra cuenta"
+                          >
+                            Mover a Cuenta USD →
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingHolding(null);
+                        setIsStockModalOpen(true);
+                      }}
+                      className={styles.secondaryCyanBtn}
+                    >
+                      <Plus className={styles.btnIcon} />
+                      <span>+ Registrar Compra de Acción</span>
+                    </button>
+                  </div>
                 </div>
 
                 {deleteError && (
@@ -2483,12 +2571,26 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                                   <div className={styles.actionBtnGroup}>
                                     <button
                                       type="button"
+                                      onClick={() => setSellingHolding(lot)}
+                                      className={styles.editTxBtn}
+                                      style={{
+                                        borderColor: 'rgba(16, 185, 129, 0.45)',
+                                        color: '#34d399',
+                                        background: 'rgba(16, 185, 129, 0.1)',
+                                      }}
+                                      title="Vender acciones de este lote y acreditar al Disponible de Stocks"
+                                    >
+                                      <ArrowUpRight className={styles.deleteIcon} />
+                                      <span>Vender</span>
+                                    </button>
+                                    <button
+                                      type="button"
                                       onClick={() => {
                                         setEditingHolding(lot);
                                         setIsStockModalOpen(true);
                                       }}
                                       className={styles.editTxBtn}
-                                      title="Editar este lote de compra"
+                                      title="Editar precio, fee o shares de este lote"
                                     >
                                       <Pencil className={styles.deleteIcon} />
                                       <span>Editar</span>

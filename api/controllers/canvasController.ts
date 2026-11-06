@@ -26,6 +26,11 @@ export async function updateAccountBalance(userId: string, accountId: string): P
        current_balance = a.initial_balance + COALESCE(a.accumulated_interest, 0) + COALESCE((
          SELECT SUM(
            CASE
+             WHEN t.sub_category_name = 'Venta de Acción / ETF'
+               THEN CASE
+                 WHEN t.destination_account_id = a.id THEN COALESCE(t.destination_amount, t.amount)
+                 ELSE 0
+               END
              WHEN t.account_id = a.id AND t.category_type IN ('INGRESO_FIJO', 'INGRESO_VARIABLE')
                THEN t.amount
              WHEN t.account_id = a.id AND t.category_type IN ('GASTO', 'AHORRO', 'INVERSION', 'DEUDA', 'TRANSFERENCIA')
