@@ -11,6 +11,7 @@ import {
   buyInvestment,
   updateInvestmentLot,
   deleteInvestmentLot,
+  sellInvestmentLot,
 } from './controllers/investmentController';
 import {
   getMonthlyCanvasView,
@@ -79,8 +80,9 @@ app.delete('/api/patrimony/:id', authenticateUser, deletePatrimonyRecord);
 app.post('/api/settings', authenticateUser, updatePeriodSettings);
 app.put('/api/settings', authenticateUser, updatePeriodSettings);
 
-// 3. Inversiones (Lotes de Compra de Acciones / ETFs)
+// 3. Inversiones (Lotes de Compra y Venta de Acciones / ETFs)
 app.post('/api/investments/buy', authenticateUser, buyInvestment);
+app.post('/api/investments/:holdingId/sell', authenticateUser, sellInvestmentLot);
 app.put('/api/investments/:holdingId', authenticateUser, updateInvestmentLot);
 app.delete('/api/investments/:holdingId', authenticateUser, deleteInvestmentLot);
 

@@ -49,20 +49,27 @@ export async function buyInvestment(req: Request, res: Response) {
     const userId = req.user?.uid || req.body?.userId;
     const {
       brokerAccountId,
+      accountId,
       ticker,
       name,
       assetClass,
       shares,
       buyPrice,
+      currentPrice,
       currency = 'USD',
       date,
       purchaseDate,
       deductFromAccount = false,
     } = req.body;
+    const requestedBrokerAccountId = brokerAccountId || accountId;
 
     const normalizedTicker = typeof ticker === 'string' ? ticker.trim().toUpperCase() : '';
     const numShares = Number(shares);
     const numBuyPrice = Number(buyPrice);
+    const manualCurrentPrice =
+      currentPrice !== undefined && currentPrice !== null && currentPrice !== ''
+        ? Number(currentPrice)
+        : null;
     const lotDate = purchaseDate || date || new Date().toISOString().slice(0, 10);
 
     if (
@@ -82,7 +89,9 @@ export async function buyInvestment(req: Request, res: Response) {
 
     const totalCost = numShares * numBuyPrice;
     const quote = await fetchYahooMarketQuote(normalizedTicker);
-    const marketPrice = quote.price ?? numBuyPrice;
+    const hasManualPrice =
+      manualCurrentPrice !== null && Number.isFinite(manualCurrentPrice) && manualCurrentPrice > 0;
+    const marketPrice = hasManualPrice ? manualCurrentPrice : quote.price ?? numBuyPrice;
     const securityName =
       (typeof name === 'string' && name.trim()) || quote.name || normalizedTicker;
     const securityAssetClass = (typeof assetClass === 'string' && assetClass.trim()) || 'Equity';
@@ -90,10 +99,10 @@ export async function buyInvestment(req: Request, res: Response) {
     const result = await withTransaction(async (client) => {
       // 1. Resolver o crear la cuenta Broker del usuario
       let resolvedAccountId: string | null = null;
-      if (brokerAccountId && UUID_REGEX.test(String(brokerAccountId))) {
+      if (requestedBrokerAccountId && UUID_REGEX.test(String(requestedBrokerAccountId))) {
         const accCheck = await client.query<{ id: string }>(
           `SELECT id FROM accounts WHERE id = $1::uuid AND user_id = $2 LIMIT 1`,
-          [brokerAccountId, userId]
+          [requestedBrokerAccountId, userId]
         );
         resolvedAccountId = accCheck.rows[0]?.id || null;
       }
@@ -142,7 +151,7 @@ export async function buyInvestment(req: Request, res: Response) {
           securityAssetClass,
           currency,
           marketPrice,
-          quote.price !== null,
+          hasManualPrice || quote.price !== null,
         ]
       );
 
@@ -249,6 +258,7 @@ export async function updateInvestmentLot(req: Request, res: Response) {
       assetClass,
       shares,
       buyPrice,
+      currentPrice,
       currency = 'USD',
       date,
       purchaseDate,
@@ -257,6 +267,10 @@ export async function updateInvestmentLot(req: Request, res: Response) {
     const normalizedTicker = typeof ticker === 'string' ? ticker.trim().toUpperCase() : '';
     const numShares = Number(shares);
     const numBuyPrice = Number(buyPrice);
+    const manualCurrentPrice =
+      currentPrice !== undefined && currentPrice !== null && currentPrice !== ''
+        ? Number(currentPrice)
+        : null;
     const lotDate = purchaseDate || date || new Date().toISOString().slice(0, 10);
 
     if (
@@ -275,7 +289,9 @@ export async function updateInvestmentLot(req: Request, res: Response) {
     }
 
     const quote = await fetchYahooMarketQuote(normalizedTicker);
-    const marketPrice = quote.price ?? numBuyPrice;
+    const hasManualPrice =
+      manualCurrentPrice !== null && Number.isFinite(manualCurrentPrice) && manualCurrentPrice > 0;
+    const marketPrice = hasManualPrice ? manualCurrentPrice : quote.price ?? numBuyPrice;
     const securityName =
       (typeof name === 'string' && name.trim()) || quote.name || normalizedTicker;
     const securityAssetClass = (typeof assetClass === 'string' && assetClass.trim()) || 'Equity';
@@ -306,6 +322,10 @@ export async function updateInvestmentLot(req: Request, res: Response) {
              name = CASE
                WHEN $7::text <> '' THEN $7::text
                ELSE securities.name
+             END,
+             last_price_update = CASE
+               WHEN $6::boolean THEN CURRENT_TIMESTAMP
+               ELSE securities.last_price_update
              END`,
         [
           normalizedTicker,
@@ -313,7 +333,7 @@ export async function updateInvestmentLot(req: Request, res: Response) {
           securityAssetClass,
           currency,
           marketPrice,
-          quote.price !== null,
+          hasManualPrice || quote.price !== null,
           typeof name === 'string' ? name.trim() : '',
         ]
       );
@@ -362,6 +382,228 @@ export async function updateInvestmentLot(req: Request, res: Response) {
   } catch (error) {
     console.error('Error al actualizar lote de inversión:', error);
     return res.status(500).json({ error: 'Error interno al actualizar el lote de inversión.' });
+  }
+}
+
+/**
+ * POST /api/investments/:holdingId/sell
+ * Registra la venta total o parcial de un lote de acciones en `portfolio_holdings`
+ * y acredita el monto neto recibido (descontando fees del broker) en la cuenta de
+ * disponible de stocks (`Broker Inversiones`) o en la cuenta USD seleccionada.
+ */
+export async function sellInvestmentLot(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || req.params.userId || req.body?.userId;
+    const holdingId = String(req.params.holdingId || '').trim();
+    const {
+      sharesToSell,
+      sellPrice,
+      brokerFee = 0,
+      netProceeds,
+      saleDate,
+      destinationAccountId,
+      creditToAccount = true,
+    } = req.body;
+
+    const numSharesToSell = Number(sharesToSell);
+    const numSellPrice = Number(sellPrice);
+    const numFee = Math.max(0, Number(brokerFee || 0));
+    const effectiveDate = saleDate || new Date().toISOString().slice(0, 10);
+
+    if (
+      !userId ||
+      !UUID_REGEX.test(holdingId) ||
+      !Number.isFinite(numSharesToSell) ||
+      numSharesToSell <= 0 ||
+      !Number.isFinite(numSellPrice) ||
+      numSellPrice <= 0
+    ) {
+      return res.status(400).json({
+        error:
+          'Datos inválidos para la venta. Indica una cantidad de acciones (> 0) y un precio de venta (> 0).',
+      });
+    }
+
+    const grossProceeds = numSharesToSell * numSellPrice;
+    const calculatedNet = Math.max(0, grossProceeds - numFee);
+    const finalNetProceeds =
+      netProceeds !== undefined && netProceeds !== null && netProceeds !== '' && Number(netProceeds) > 0
+        ? Number(Number(netProceeds).toFixed(2))
+        : Number(calculatedNet.toFixed(2));
+
+    if (finalNetProceeds <= 0) {
+      return res.status(400).json({
+        error: 'El monto neto a recibir por la venta debe ser mayor a 0.',
+      });
+    }
+
+    const saleResult = await withTransaction(async (client) => {
+      const existingRes = await client.query<{
+        id: string;
+        account_id: string;
+        ticker: string;
+        shares: string;
+        average_buy_price: string;
+        purchase_date: string | Date | null;
+        currency: string;
+      }>(
+        `SELECT id, account_id, ticker, shares, average_buy_price, purchase_date, currency
+         FROM portfolio_holdings
+         WHERE id = $1::uuid AND user_id = $2
+         FOR UPDATE`,
+        [holdingId, userId]
+      );
+
+      if (existingRes.rowCount === 0) {
+        return { notFound: true as const };
+      }
+
+      const lot = existingRes.rows[0];
+      const currentShares = Number(lot.shares || 0);
+
+      if (numSharesToSell > currentShares + 0.000001) {
+        return {
+          exceedsShares: true as const,
+          availableShares: currentShares,
+        };
+      }
+
+      const remainingShares = Number((currentShares - numSharesToSell).toFixed(8));
+      const isFullSale = remainingShares <= 0.0000005;
+
+      // Actualizar precio actual de la acción al precio de venta ejecutado
+      await client.query(
+        `UPDATE securities
+         SET current_price = $1,
+             last_price_update = CURRENT_TIMESTAMP
+         WHERE ticker = $2`,
+        [numSellPrice, lot.ticker]
+      );
+
+      if (isFullSale) {
+        await client.query(
+          `DELETE FROM portfolio_holdings WHERE id = $1::uuid AND user_id = $2`,
+          [holdingId, userId]
+        );
+      } else {
+        await client.query(
+          `UPDATE portfolio_holdings
+           SET shares = $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2::uuid AND user_id = $3`,
+          [remainingShares, holdingId, userId]
+        );
+      }
+
+      let targetAccountId = lot.account_id;
+      if (destinationAccountId && UUID_REGEX.test(String(destinationAccountId))) {
+        const destCheck = await client.query<{ id: string }>(
+          `SELECT id FROM accounts WHERE id = $1::uuid AND user_id = $2 LIMIT 1`,
+          [destinationAccountId, userId]
+        );
+        if (destCheck.rows[0]?.id) {
+          targetAccountId = destCheck.rows[0].id;
+        }
+      }
+
+      let creditedAccountBalance: number | null = null;
+      let transactionId: string | null = null;
+
+      if (creditToAccount) {
+        const accUpdate = await client.query<{ current_balance: string; name: string }>(
+          `UPDATE accounts
+           SET current_balance = current_balance + $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2::uuid AND user_id = $3
+           RETURNING current_balance, name`,
+          [finalNetProceeds, targetAccountId, userId]
+        );
+        creditedAccountBalance = Number(accUpdate.rows[0]?.current_balance || 0);
+
+        const lotBuyPrice = Number(lot.average_buy_price || 0);
+        const lotBuyDate = lot.purchase_date
+          ? new Date(lot.purchase_date).toISOString().slice(0, 10)
+          : effectiveDate;
+        const costBasisSold = Number((numSharesToSell * lotBuyPrice).toFixed(2));
+        const realizedPnl = Number((finalNetProceeds - costBasisSold).toFixed(2));
+        const feeText = numFee > 0 ? ` · Fee: $${numFee.toFixed(2)}` : '';
+        const pnlText = `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`;
+
+        const catRes = await client.query<{ id: string }>(
+          `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active)
+           VALUES ($1, 'TRANSFERENCIA', 'Transferencia', 'Venta de Acción / ETF', TRUE)
+           ON CONFLICT (user_id, type, category_name, sub_category_name)
+           DO UPDATE SET is_active = TRUE
+           RETURNING id`,
+          [userId]
+        );
+        const categoryId = catRes.rows[0]?.id || null;
+
+        const txInsert = await client.query<{ id: string }>(
+          `INSERT INTO transactions (
+            user_id,
+            account_id,
+            destination_account_id,
+            category_id,
+            date,
+            amount,
+            destination_amount,
+            currency,
+            category_type,
+            category_name,
+            sub_category_name,
+            description,
+            is_recurring
+          )
+          VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5::date, $6, $6, $7, 'TRANSFERENCIA', 'Transferencia', 'Venta de Acción / ETF', $8, FALSE)
+          RETURNING id`,
+          [
+            userId,
+            lot.account_id,
+            targetAccountId,
+            categoryId,
+            effectiveDate,
+            finalNetProceeds,
+            lot.currency || 'USD',
+            `Venta ${isFullSale ? 'total' : 'parcial'} de ${numSharesToSell} ${lot.ticker} @ $${numSellPrice} (Compra: ${lotBuyDate} @ $${lotBuyPrice.toFixed(4)} · Neto: $${finalNetProceeds.toFixed(2)}${feeText} · PnL: ${pnlText})`,
+          ]
+        );
+        transactionId = txInsert.rows[0]?.id || null;
+      }
+
+      return {
+        notFound: false as const,
+        exceedsShares: false as const,
+        ticker: lot.ticker,
+        soldShares: numSharesToSell,
+        remainingShares: isFullSale ? 0 : remainingShares,
+        isFullSale,
+        netProceeds: finalNetProceeds,
+        targetAccountId,
+        creditedAccountBalance,
+        transactionId,
+      };
+    });
+
+    if (saleResult.notFound) {
+      return res.status(404).json({ error: 'El lote de inversión no existe.' });
+    }
+    if (saleResult.exceedsShares) {
+      return res.status(400).json({
+        error: `No puedes vender más acciones de las que tiene el lote (${saleResult.availableShares}).`,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      ...saleResult,
+      message: saleResult.isFullSale
+        ? `Venta total de ${saleResult.ticker} registrada y saldo acreditado.`
+        : `Venta parcial de ${saleResult.ticker} registrada (${saleResult.remainingShares} shares restantes).`,
+    });
+  } catch (error) {
+    console.error('Error al vender lote de inversión:', error);
+    return res.status(500).json({ error: 'Error interno al procesar la venta de la acción.' });
   }
 }
 
