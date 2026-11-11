@@ -530,11 +530,14 @@ export async function sellInvestmentLot(req: Request, res: Response) {
         const pnlText = `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`;
 
         const catRes = await client.query<{ id: string }>(
-          `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active)
-           VALUES ($1, 'TRANSFERENCIA', 'Transferencia', 'Venta de Acción / ETF', TRUE)
-           ON CONFLICT (user_id, type, category_name, sub_category_name)
-           DO UPDATE SET is_active = TRUE
-           RETURNING id`,
+          `SELECT id
+           FROM categories
+           WHERE (is_global = TRUE OR user_id = $1)
+             AND type = 'TRANSFERENCIA'
+             AND category_name = 'Transferencia'
+             AND sub_category_name = 'Venta de Acción / ETF'
+           ORDER BY is_global DESC
+           LIMIT 1`,
           [userId]
         );
         const categoryId = catRes.rows[0]?.id || null;

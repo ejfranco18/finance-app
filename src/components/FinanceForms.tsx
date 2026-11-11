@@ -24,6 +24,10 @@ import {
   Code2,
   Wallet,
   TrendingUp,
+  Tags,
+  Plus,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import styles from './FinanceForms.module.css';
 
@@ -156,6 +160,11 @@ const CATEGORIES_BY_TYPE: Record<TransactionType, CategoryGroup[]> = {
       dbType: 'GASTO',
       subcategories: ['Otros gastos'],
     },
+    {
+      name: 'General',
+      dbType: 'GASTO',
+      subcategories: ['General'],
+    },
   ],
   ingreso: [
     {
@@ -207,6 +216,15 @@ export interface AccountOption {
   current_balance?: string | number;
 }
 
+export interface CategoryOption {
+  id: string;
+  user_id?: string | null;
+  type: string;
+  category_name: string;
+  sub_category_name: string;
+  is_global?: boolean;
+}
+
 export interface EditableTransaction {
   id: string;
   date: string;
@@ -237,6 +255,7 @@ interface TransactionFormProps {
   isOpen: boolean;
   onClose: () => void;
   accounts?: AccountOption[];
+  categories?: CategoryOption[];
   trm?: number;
   editingTransaction?: EditableTransaction | null;
   initialDraft?: InitialTransactionDraft | null;
@@ -254,6 +273,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   isOpen,
   onClose,
   accounts = [],
+  categories = [],
   trm = 3303.16,
   editingTransaction = null,
   initialDraft = null,
@@ -279,10 +299,49 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [successPayload, setSuccessPayload] = useState<TransactionPayload | null>(null);
 
-  const availableCategories = CATEGORIES_BY_TYPE[tipo] || CATEGORIES_BY_TYPE.gasto;
+  const availableCategories: CategoryGroup[] = React.useMemo(() => {
+    const baseGroups = (CATEGORIES_BY_TYPE[tipo] || CATEGORIES_BY_TYPE.gasto).map((g) => ({
+      name: g.name,
+      dbType: g.dbType,
+      subcategories: [...g.subcategories],
+    }));
+
+    for (const row of categories) {
+      const uiType = mapDbCategoryTypeToUiType(row.type);
+      if (uiType !== tipo) continue;
+      const catName = (row.category_name || '').trim();
+      const subName = (row.sub_category_name || 'General').trim();
+      if (!catName) continue;
+
+      let group = baseGroups.find((g) => g.name.toLowerCase() === catName.toLowerCase());
+      if (!group) {
+        group = {
+          name: catName,
+          dbType: row.type as CategoryGroup['dbType'],
+          subcategories: [],
+        };
+        baseGroups.push(group);
+      }
+      if (
+        subName &&
+        !group.subcategories.some((s) => s.toLowerCase() === subName.toLowerCase())
+      ) {
+        group.subcategories.push(subName);
+      }
+    }
+
+    return baseGroups;
+  }, [tipo, categories]);
+
   const selectedCategoryGroup =
     availableCategories.find((c) => c.name === categoriaMacroId) || availableCategories[0];
-  const availableSubcategories = selectedCategoryGroup?.subcategories || [];
+  const availableSubcategories = React.useMemo(() => {
+    const list = [...(selectedCategoryGroup?.subcategories || [])];
+    if (subcategoria && !list.includes(subcategoria)) {
+      list.push(subcategoria);
+    }
+    return list;
+  }, [selectedCategoryGroup, subcategoria]);
 
   const originAccount = accounts.find((a) => a.id === cuentaOrigenId);
   const destAccount =
@@ -415,7 +474,7 @@ export const TransactionFormModal: React.FC<TransactionFormProps> = ({
       setDescripcion('');
       setEsRecurrente(false);
     }
-  }, [isOpen, editingTransaction, initialDraft, accounts]);
+  }, [isOpen, editingTransaction, initialDraft]);
 
   if (!isOpen) return null;
 
@@ -3341,5 +3400,798 @@ export const SellStockHoldingModal: React.FC<SellStockHoldingModalProps> = ({
     </div>
   );
 };
+
+interface CategoriesManagerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  categories?: CategoryOption[];
+}
+
+interface CatalogSubcategoryItem {
+  id?: string;
+  name: string;
+  is_global: boolean;
+}
+
+interface CatalogCategoryGroup {
+  key: string;
+  name: string;
+  dbType: string;
+  uiType: TransactionType;
+  isCustomCategory: boolean;
+  firstCustomRowId?: string;
+  subcategories: CatalogSubcategoryItem[];
+}
+
+function formatDbCategoryTypeBadge(dbType: string): string {
+  switch (dbType) {
+    case 'GASTO':
+      return 'Gasto';
+    case 'INGRESO_FIJO':
+      return 'Ingreso Fijo';
+    case 'INGRESO_VARIABLE':
+      return 'Ingreso Variable';
+    case 'AHORRO':
+      return 'Ahorro';
+    case 'INVERSION':
+      return 'Inversión';
+    case 'TRANSFERENCIA':
+      return 'Transferencia';
+    default:
+      return dbType;
+  }
+}
+
+export const CategoriesManagerModal: React.FC<CategoriesManagerModalProps> = ({
+  isOpen,
+  onClose,
+  categories = [],
+}) => {
+  const queryClient = useQueryClient();
+
+  const [filterTab, setFilterTab] = useState<'all' | TransactionType | 'custom'>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  const [formMode, setFormMode] = useState<
+    'closed' | 'create_category' | 'create_subcategory' | 'edit_category' | 'edit_subcategory'
+  >('closed');
+  const [editingRowId, setEditingRowId] = useState<string>('');
+  const [formDbType, setFormDbType] = useState<string>('GASTO');
+  const [formCategoryName, setFormCategoryName] = useState<string>('');
+  const [formSelectedParentKey, setFormSelectedParentKey] = useState<string>('');
+  const [formSubCategoryName, setFormSubCategoryName] = useState<string>('General');
+  const [formError, setFormError] = useState<string>('');
+  const [formSuccess, setFormSuccess] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const groupedCatalog: CatalogCategoryGroup[] = React.useMemo(() => {
+    const map = new Map<string, CatalogCategoryGroup>();
+
+    // 1. Semilla base estática por si aún no han cargado filas o como respaldo
+    (Object.keys(CATEGORIES_BY_TYPE) as TransactionType[]).forEach((uiType) => {
+      for (const group of CATEGORIES_BY_TYPE[uiType]) {
+        const key = `${group.dbType}::${group.name.toLowerCase()}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            key,
+            name: group.name,
+            dbType: group.dbType,
+            uiType,
+            isCustomCategory: false,
+            subcategories: group.subcategories.map((sub) => ({
+              name: sub,
+              is_global: true,
+            })),
+          });
+        }
+      }
+    });
+
+    // 2. Superponer datos reales de Neon DB (incluyendo IDs y flag is_global)
+    for (const row of categories) {
+      const catName = (row.category_name || '').trim();
+      const subName = (row.sub_category_name || 'General').trim();
+      const dbType = (row.type || 'GASTO').trim().toUpperCase();
+      if (!catName) continue;
+
+      const key = `${dbType}::${catName.toLowerCase()}`;
+      const uiType = mapDbCategoryTypeToUiType(dbType);
+      const isGlobalRow = Boolean(row.is_global);
+
+      let existingGroup = map.get(key);
+      if (!existingGroup) {
+        existingGroup = {
+          key,
+          name: catName,
+          dbType,
+          uiType,
+          isCustomCategory: !isGlobalRow,
+          firstCustomRowId: !isGlobalRow ? row.id : undefined,
+          subcategories: [],
+        };
+        map.set(key, existingGroup);
+      } else {
+        if (isGlobalRow) {
+          existingGroup.isCustomCategory = false;
+        } else if (!existingGroup.firstCustomRowId) {
+          existingGroup.firstCustomRowId = row.id;
+        }
+      }
+
+      const existingSub = existingGroup.subcategories.find(
+        (s) => s.name.toLowerCase() === subName.toLowerCase()
+      );
+      if (existingSub) {
+        existingSub.id = row.id;
+        existingSub.is_global = isGlobalRow;
+      } else {
+        existingGroup.subcategories.push({
+          id: row.id,
+          name: subName,
+          is_global: isGlobalRow,
+        });
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.isCustomCategory !== b.isCustomCategory) {
+        return a.isCustomCategory ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name, 'es');
+    });
+  }, [categories]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setFormMode('closed');
+      setFormError('');
+      setFormSuccess('');
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!formSelectedParentKey && groupedCatalog.length > 0) {
+      setFormSelectedParentKey(groupedCatalog[0].key);
+    }
+  }, [groupedCatalog, formSelectedParentKey]);
+
+  if (!isOpen) return null;
+
+  const openCreateCategoryForm = () => {
+    setFormMode('create_category');
+    setEditingRowId('');
+    setFormDbType('GASTO');
+    setFormCategoryName('');
+    setFormSubCategoryName('General');
+    setFormError('');
+    setFormSuccess('');
+  };
+
+  const openCreateSubcategoryForm = (preselectedGroup?: CatalogCategoryGroup) => {
+    const targetGroup = preselectedGroup || groupedCatalog[0];
+    setFormMode('create_subcategory');
+    setEditingRowId('');
+    if (targetGroup) {
+      setFormSelectedParentKey(targetGroup.key);
+      setFormDbType(targetGroup.dbType);
+      setFormCategoryName(targetGroup.name);
+    }
+    setFormSubCategoryName('');
+    setFormError('');
+    setFormSuccess('');
+  };
+
+  const openEditMacroCategoryForm = (group: CatalogCategoryGroup) => {
+    if (!group.firstCustomRowId) return;
+    setFormMode('edit_category');
+    setEditingRowId(group.firstCustomRowId);
+    setFormDbType(group.dbType);
+    setFormCategoryName(group.name);
+    setFormSubCategoryName('');
+    setFormError('');
+    setFormSuccess('');
+  };
+
+  const openEditSubcategoryForm = (
+    group: CatalogCategoryGroup,
+    sub: CatalogSubcategoryItem
+  ) => {
+    if (!sub.id) return;
+    setFormMode('edit_subcategory');
+    setEditingRowId(sub.id);
+    setFormSelectedParentKey(group.key);
+    setFormDbType(group.dbType);
+    setFormCategoryName(group.name);
+    setFormSubCategoryName(sub.name);
+    setFormError('');
+    setFormSuccess('');
+  };
+
+  const handleSaveForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    setFormSuccess('');
+
+    const parentGroup = groupedCatalog.find((g) => g.key === formSelectedParentKey);
+    const effectiveDbType =
+      formMode === 'create_subcategory' || formMode === 'edit_subcategory'
+        ? parentGroup?.dbType || formDbType
+        : formDbType;
+    const effectiveCategoryName =
+      formMode === 'create_subcategory' || formMode === 'edit_subcategory'
+        ? (parentGroup?.name || formCategoryName).trim()
+        : formCategoryName.trim();
+    const effectiveSubCategoryName =
+      formMode === 'create_category'
+        ? (formSubCategoryName.trim() || 'General')
+        : formSubCategoryName.trim();
+
+    if (effectiveCategoryName.length < 2) {
+      setFormError('El nombre de la categoría debe tener al menos 2 caracteres.');
+      return;
+    }
+
+    if (formMode !== 'edit_category' && effectiveSubCategoryName.length < 2) {
+      setFormError('El nombre de la subcategoría debe tener al menos 2 caracteres.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const headers = await buildAuthHeaders();
+      const isEditing = formMode === 'edit_category' || formMode === 'edit_subcategory';
+      const endpoint = isEditing
+        ? `/api/categories/${encodeURIComponent(editingRowId)}`
+        : '/api/categories';
+      const method = isEditing ? 'PUT' : 'POST';
+
+      const res = await fetch(endpoint, {
+        method,
+        headers,
+        body: JSON.stringify({
+          type: effectiveDbType,
+          categoryName: effectiveCategoryName,
+          subCategoryName: effectiveSubCategoryName,
+          renameMacroCategory: formMode === 'edit_category',
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'No se pudo guardar la categoría.');
+      }
+
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+      setFormSuccess(
+        formMode === 'create_category'
+          ? `Categoría "${effectiveCategoryName}" creada con subcategoría "${effectiveSubCategoryName}".`
+          : formMode === 'create_subcategory'
+            ? `Subcategoría "${effectiveSubCategoryName}" agregada a "${effectiveCategoryName}".`
+            : 'Cambios guardados exitosamente.'
+      );
+      setFormMode('closed');
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : 'Error al guardar la categoría personalizada.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteSubcategory = async (subId: string, subName: string) => {
+    setDeletingId(subId);
+    setFormError('');
+    setFormSuccess('');
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(`/api/categories/${encodeURIComponent(subId)}`, {
+        method: 'DELETE',
+        headers,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'No se pudo eliminar la subcategoría personalizada.');
+      }
+      await queryClient.invalidateQueries({ queryKey: ['canvas-dashboard'] });
+      setFormSuccess(
+        `Subcategoría "${subName}" eliminada (movimientos asociados reasignados a General).`
+      );
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : 'Error al eliminar la subcategoría personalizada.'
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredGroups = groupedCatalog.filter((group) => {
+    if (filterTab === 'custom') {
+      const hasCustom =
+        group.isCustomCategory || group.subcategories.some((s) => !s.is_global);
+      if (!hasCustom) return false;
+    } else if (filterTab !== 'all' && group.uiType !== filterTab) {
+      return false;
+    }
+
+    if (!normalizedSearch) return true;
+    if (group.name.toLowerCase().includes(normalizedSearch)) return true;
+    return group.subcategories.some((s) => s.name.toLowerCase().includes(normalizedSearch));
+  });
+
+  return (
+    <div className={styles.overlay}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="categories-modal-title"
+        className={styles.modalCard}
+        style={{ maxWidth: '54rem' }}
+      >
+        <div className={styles.topGlowCyan} />
+
+        {/* Header */}
+        <div className={styles.modalHeader}>
+          <div className={styles.headerLeft}>
+            <div className={styles.iconBoxCyan}>
+              <Tags className={styles.headerIcon} />
+            </div>
+            <div>
+              <h2 id="categories-modal-title" className={styles.modalTitle}>
+                Categorías y Subcategorías
+              </h2>
+              <p className={styles.modalSubtitle}>
+                Catálogo global base + tus categorías y subcategorías personalizadas
+              </p>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <button
+              type="button"
+              onClick={openCreateCategoryForm}
+              className={styles.submitBtnEmerald}
+              style={{
+                width: 'auto',
+                padding: '0.5rem 0.95rem',
+                fontSize: '0.82rem',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+              }}
+            >
+              <Plus style={{ width: '1rem', height: '1rem' }} />
+              <span>Crear categoría</span>
+            </button>
+            <button onClick={onClose} aria-label="Cerrar modal" className={styles.closeBtn}>
+              <X className={styles.closeIcon} />
+            </button>
+          </div>
+        </div>
+
+        <div className={styles.form} style={{ maxHeight: '78vh', overflowY: 'auto' }}>
+          {formSuccess && (
+            <div
+              className={styles.successBannerEmerald}
+              style={{ padding: '0.65rem 0.9rem', marginBottom: '0.25rem' }}
+            >
+              <CheckCircle2 className={styles.successIconEmerald} />
+              <span style={{ fontSize: '0.83rem', color: '#d1fae5' }}>{formSuccess}</span>
+            </div>
+          )}
+
+          {formError && formMode === 'closed' && (
+            <p className={styles.errorText}>
+              <AlertCircle className={styles.errorIcon} /> {formError}
+            </p>
+          )}
+
+          {/* Formulario de Creación / Edición */}
+          {formMode !== 'closed' && (
+            <form
+              onSubmit={handleSaveForm}
+              className={styles.payloadBox}
+              style={{ padding: '1rem', border: '1px solid rgba(56, 189, 248, 0.35)' }}
+            >
+              <div
+                className={styles.payloadHeader}
+                style={{
+                  marginBottom: '0.85rem',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '0.5rem',
+                }}
+              >
+                <span className={styles.payloadLabelCyan} style={{ fontSize: '0.85rem' }}>
+                  {formMode === 'edit_category'
+                    ? 'Editar Categoría Personalizada'
+                    : formMode === 'edit_subcategory'
+                      ? 'Editar Subcategoría Personalizada'
+                      : 'Nueva Categoría o Subcategoría Personalizada'}
+                </span>
+
+                {(formMode === 'create_category' || formMode === 'create_subcategory') && (
+                  <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <button
+                      type="button"
+                      onClick={openCreateCategoryForm}
+                      className={`${styles.segBtn} ${
+                        formMode === 'create_category' ? styles.segBtnActiveEmerald : ''
+                      }`}
+                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+                    >
+                      Crear Categoría
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openCreateSubcategoryForm()}
+                      className={`${styles.segBtn} ${
+                        formMode === 'create_subcategory' ? styles.segBtnActiveCyan : ''
+                      }`}
+                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.78rem' }}
+                    >
+                      Crear Subcategoría
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Caso 1: Crear Categoría o Editar Categoría */}
+              {(formMode === 'create_category' || formMode === 'edit_category') && (
+                <div className={styles.gridTwoCols}>
+                  <div>
+                    <label htmlFor="cat-mgr-type" className={styles.label}>
+                      Tipo de Movimiento
+                    </label>
+                    <select
+                      id="cat-mgr-type"
+                      value={formDbType}
+                      onChange={(e) => setFormDbType(e.target.value)}
+                      className={styles.input}
+                    >
+                      <option value="GASTO">Gasto / Egreso</option>
+                      <option value="INGRESO_FIJO">Ingreso Fijo</option>
+                      <option value="INGRESO_VARIABLE">Ingreso Variable</option>
+                      <option value="AHORRO">Ahorro</option>
+                      <option value="INVERSION">Inversión</option>
+                      <option value="TRANSFERENCIA">Transferencia / Pago TC</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label htmlFor="cat-mgr-name" className={styles.label}>
+                      Nombre de la Categoría <span className={styles.requiredStar}>*</span>
+                    </label>
+                    <input
+                      id="cat-mgr-name"
+                      type="text"
+                      placeholder="ej. Proyectos, Negocio, Educación..."
+                      value={formCategoryName}
+                      onChange={(e) => setFormCategoryName(e.target.value)}
+                      className={styles.input}
+                    />
+                  </div>
+
+                  {formMode === 'create_category' && (
+                    <div className={styles.colSpan2}>
+                      <label htmlFor="cat-mgr-init-sub" className={styles.label}>
+                        Subcategoría Inicial <span className={styles.requiredStar}>*</span>
+                      </label>
+                      <input
+                        id="cat-mgr-init-sub"
+                        type="text"
+                        placeholder="ej. General, Materiales..."
+                        value={formSubCategoryName}
+                        onChange={(e) => setFormSubCategoryName(e.target.value)}
+                        className={styles.input}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Caso 2: Crear Subcategoría o Editar Subcategoría (con Dropdown de Categoría) */}
+              {(formMode === 'create_subcategory' || formMode === 'edit_subcategory') && (
+                <div className={styles.gridTwoCols}>
+                  <div>
+                    <label htmlFor="cat-mgr-parent-select" className={styles.label}>
+                      Categoría a la que pertenece <span className={styles.requiredStar}>*</span>
+                    </label>
+                    <select
+                      id="cat-mgr-parent-select"
+                      value={formSelectedParentKey}
+                      onChange={(e) => {
+                        const nextKey = e.target.value;
+                        setFormSelectedParentKey(nextKey);
+                        const found = groupedCatalog.find((g) => g.key === nextKey);
+                        if (found) {
+                          setFormDbType(found.dbType);
+                          setFormCategoryName(found.name);
+                        }
+                      }}
+                      className={styles.input}
+                    >
+                      {groupedCatalog.map((group) => (
+                        <option key={group.key} value={group.key}>
+                          {group.name} ({formatDbCategoryTypeBadge(group.dbType)}
+                          {group.isCustomCategory ? ' · Personalizada' : ''})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label htmlFor="cat-mgr-subname" className={styles.label}>
+                      Nombre de la Subcategoría <span className={styles.requiredStar}>*</span>
+                    </label>
+                    <input
+                      id="cat-mgr-subname"
+                      type="text"
+                      placeholder="ej. Panadería, Peluquería..."
+                      value={formSubCategoryName}
+                      onChange={(e) => setFormSubCategoryName(e.target.value)}
+                      className={styles.input}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {formError && (
+                <p className={styles.errorText} style={{ marginTop: '0.5rem' }}>
+                  <AlertCircle className={styles.errorIcon} /> {formError}
+                </p>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.85rem' }}>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className={styles.submitBtnEmerald}
+                  style={{ width: 'auto', padding: '0.45rem 1rem', fontSize: '0.82rem' }}
+                >
+                  {isSubmitting
+                    ? 'Guardando...'
+                    : formMode === 'create_category'
+                      ? 'Guardar Categoría'
+                      : formMode === 'create_subcategory'
+                        ? 'Guardar Subcategoría'
+                        : 'Guardar Cambios'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => {
+                    setFormMode('closed');
+                    setFormError('');
+                  }}
+                  className={styles.secondaryActionBtn}
+                  style={{ padding: '0.45rem 0.9rem', fontSize: '0.82rem' }}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Filtros y Búsqueda */}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '0.65rem',
+            }}
+          >
+            <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+              {[
+                { id: 'all', label: 'Todas' },
+                { id: 'gasto', label: 'Gastos' },
+                { id: 'ingreso', label: 'Ingresos' },
+                { id: 'ahorro_inversion', label: 'Ahorro / Inversión' },
+                { id: 'transferencia', label: 'Transferencias' },
+                { id: 'custom', label: 'Personalizadas' },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() =>
+                    setFilterTab(tab.id as 'all' | TransactionType | 'custom')
+                  }
+                  className={`${styles.segBtn} ${
+                    filterTab === tab.id ? styles.segBtnActiveCyan : ''
+                  }`}
+                  style={{ padding: '0.35rem 0.7rem', fontSize: '0.76rem' }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <input
+              type="search"
+              placeholder="Buscar categoría o subcategoría..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className={styles.input}
+              style={{ maxWidth: '16rem', padding: '0.4rem 0.75rem', fontSize: '0.8rem' }}
+            />
+          </div>
+
+          {/* Lista de Categorías y Subcategorías */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+              gap: '0.85rem',
+            }}
+          >
+            {filteredGroups.map((group) => (
+              <div
+                key={group.key}
+                className={styles.payloadBox}
+                style={{
+                  padding: '0.85rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.6rem',
+                  borderColor: group.isCustomCategory
+                    ? 'rgba(52, 211, 153, 0.35)'
+                    : 'rgba(148, 163, 184, 0.16)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start',
+                    gap: '0.5rem',
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.4rem',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <strong style={{ color: '#f8fafc', fontSize: '0.92rem' }}>
+                        {group.name}
+                      </strong>
+                      <span
+                        style={{
+                          fontSize: '0.68rem',
+                          padding: '0.1rem 0.45rem',
+                          borderRadius: '999px',
+                          background: 'rgba(56, 189, 248, 0.12)',
+                          color: '#38bdf8',
+                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                        }}
+                      >
+                        {formatDbCategoryTypeBadge(group.dbType)}
+                      </span>
+                      {group.isCustomCategory && (
+                        <span
+                          style={{
+                            fontSize: '0.68rem',
+                            padding: '0.1rem 0.45rem',
+                            borderRadius: '999px',
+                            background: 'rgba(16, 185, 129, 0.15)',
+                            color: '#34d399',
+                            border: '1px solid rgba(16, 185, 129, 0.3)',
+                          }}
+                        >
+                          Personalizada
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                    {group.isCustomCategory && group.firstCustomRowId && (
+                      <button
+                        type="button"
+                        onClick={() => openEditMacroCategoryForm(group)}
+                        title="Editar nombre de esta categoría personalizada"
+                        className={styles.secondaryActionBtn}
+                        style={{ padding: '0.22rem 0.45rem', fontSize: '0.72rem' }}
+                      >
+                        <Pencil style={{ width: '0.75rem', height: '0.75rem' }} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => openCreateSubcategoryForm(group)}
+                      title={`Agregar subcategoría a ${group.name}`}
+                      className={styles.secondaryActionBtn}
+                      style={{ padding: '0.22rem 0.5rem', fontSize: '0.72rem' }}
+                    >
+                      + Subcategoría
+                    </button>
+                  </div>
+                </div>
+
+                {/* Subcategorías */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                  {group.subcategories.map((sub) => (
+                    <div
+                      key={`${group.key}-${sub.name}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '0.35rem 0.55rem',
+                        borderRadius: '0.45rem',
+                        background: sub.is_global
+                          ? 'rgba(15, 23, 42, 0.55)'
+                          : 'rgba(16, 185, 129, 0.08)',
+                        border: sub.is_global
+                          ? '1px solid rgba(148, 163, 184, 0.12)'
+                          : '1px solid rgba(16, 185, 129, 0.28)',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <span style={{ color: '#e2e8f0' }}>{sub.name}</span>
+                        {!sub.is_global && (
+                          <span
+                            style={{
+                              fontSize: '0.65rem',
+                              color: '#34d399',
+                              fontWeight: 600,
+                            }}
+                          >
+                            · Personalizada
+                          </span>
+                        )}
+                      </div>
+
+                      {!sub.is_global && sub.id && (
+                        <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => openEditSubcategoryForm(group, sub)}
+                            title="Editar subcategoría personalizada"
+                            className={styles.secondaryActionBtn}
+                            style={{ padding: '0.18rem 0.4rem', fontSize: '0.7rem' }}
+                          >
+                            <Pencil style={{ width: '0.72rem', height: '0.72rem' }} />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingId === sub.id}
+                            onClick={() => handleDeleteSubcategory(sub.id!, sub.name)}
+                            title="Eliminar subcategoría personalizada"
+                            className={styles.secondaryActionBtn}
+                            style={{
+                              padding: '0.18rem 0.4rem',
+                              fontSize: '0.7rem',
+                              color: '#fb7185',
+                              borderColor: 'rgba(244, 63, 94, 0.3)',
+                            }}
+                          >
+                            <Trash2 style={{ width: '0.72rem', height: '0.72rem' }} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 

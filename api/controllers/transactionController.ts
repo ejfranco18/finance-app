@@ -13,6 +13,137 @@ const VALID_CATEGORY_TYPES = new Set([
 
 const VALID_CURRENCIES = new Set(['COP', 'USD']);
 
+export async function resolveExistingOrFallbackCategory(
+  client: {
+    query: <T = Record<string, unknown>>(
+      text: string,
+      values?: unknown[]
+    ) => Promise<{ rows: T[]; rowCount: number | null }>;
+  },
+  params: {
+    userId: string;
+    categoryId?: string | null;
+    categoryType: string;
+    categoryName: string;
+    subCategoryName?: string | null;
+  }
+): Promise<{
+  categoryId: string | null;
+  categoryType: string;
+  categoryName: string;
+  subCategoryName: string;
+}> {
+  const { userId, categoryId, categoryType, categoryName, subCategoryName } = params;
+  const cleanCatName = String(categoryName || '').trim();
+  const cleanSubName = String(subCategoryName || '').trim();
+
+  if (
+    categoryId &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId)
+  ) {
+    const byId = await client.query<{
+      id: string;
+      type: string;
+      category_name: string;
+      sub_category_name: string | null;
+    }>(
+      `SELECT id, type, category_name, sub_category_name
+       FROM categories
+       WHERE id = $1::uuid
+         AND (is_global = TRUE OR user_id = $2)
+         AND is_active = TRUE
+       LIMIT 1`,
+      [categoryId, userId]
+    );
+    if (byId.rows[0]) {
+      return {
+        categoryId: byId.rows[0].id,
+        categoryType: byId.rows[0].type,
+        categoryName: byId.rows[0].category_name,
+        subCategoryName: byId.rows[0].sub_category_name || 'General',
+      };
+    }
+  }
+
+  if (cleanCatName && cleanSubName) {
+    const exactMatch = await client.query<{
+      id: string;
+      type: string;
+      category_name: string;
+      sub_category_name: string | null;
+    }>(
+      `SELECT id, type, category_name, sub_category_name
+       FROM categories
+       WHERE (is_global = TRUE OR user_id = $1)
+         AND is_active = TRUE
+         AND LOWER(category_name) = LOWER($2)
+         AND LOWER(COALESCE(sub_category_name, '')) = LOWER($3)
+       ORDER BY CASE WHEN type = $4 THEN 0 ELSE 1 END, is_global DESC
+       LIMIT 1`,
+      [userId, cleanCatName, cleanSubName, categoryType]
+    );
+    if (exactMatch.rows[0]) {
+      return {
+        categoryId: exactMatch.rows[0].id,
+        categoryType: exactMatch.rows[0].type,
+        categoryName: exactMatch.rows[0].category_name,
+        subCategoryName: exactMatch.rows[0].sub_category_name || 'General',
+      };
+    }
+  }
+
+  const candidateSub = cleanSubName || cleanCatName;
+  if (candidateSub) {
+    const bySubMatch = await client.query<{
+      id: string;
+      type: string;
+      category_name: string;
+      sub_category_name: string | null;
+    }>(
+      `SELECT id, type, category_name, sub_category_name
+       FROM categories
+       WHERE (is_global = TRUE OR user_id = $1)
+         AND is_active = TRUE
+         AND (
+           LOWER(COALESCE(sub_category_name, '')) = LOWER($2)
+           OR LOWER(COALESCE(sub_category_name, '')) = LOWER($3)
+         )
+       ORDER BY CASE WHEN type = $4 THEN 0 ELSE 1 END, is_global DESC
+       LIMIT 1`,
+      [userId, candidateSub, cleanCatName, categoryType]
+    );
+    if (bySubMatch.rows[0]) {
+      return {
+        categoryId: bySubMatch.rows[0].id,
+        categoryType: bySubMatch.rows[0].type,
+        categoryName: bySubMatch.rows[0].category_name,
+        subCategoryName: bySubMatch.rows[0].sub_category_name || 'General',
+      };
+    }
+  }
+
+  const generalFallback = await client.query<{
+    id: string;
+    type: string;
+    category_name: string;
+    sub_category_name: string | null;
+  }>(
+    `SELECT id, type, category_name, sub_category_name
+     FROM categories
+     WHERE is_global = TRUE
+       AND LOWER(category_name) = 'general'
+       AND LOWER(COALESCE(sub_category_name, '')) = 'general'
+     LIMIT 1`
+  );
+
+  return {
+    categoryId: generalFallback.rows[0]?.id || null,
+    categoryType: categoryType || 'GASTO',
+    categoryName: 'General',
+    subCategoryName: 'General',
+  };
+}
+
 export async function createTransaction(req: Request, res: Response) {
   try {
     const userId = req.user?.uid || req.body?.userId;
@@ -124,19 +255,14 @@ export async function createTransaction(req: Request, res: Response) {
           ? rawDestinationAmount
           : null;
 
-      // Asegurar que la categoría y subcategoría existan en la tabla categories
-      let resolvedCategoryId = categoryId;
-      if (!resolvedCategoryId && categoryName) {
-        const catRes = await client.query<{ id: string }>(
-          `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active)
-           VALUES ($1, $2, $3, $4, TRUE)
-           ON CONFLICT (user_id, type, category_name, sub_category_name)
-           DO UPDATE SET is_active = TRUE
-           RETURNING id`,
-          [userId, categoryType, categoryName, subCategoryName]
-        );
-        resolvedCategoryId = catRes.rows[0]?.id || null;
-      }
+      // Resolver categoría contra globales o personalizadas del usuario (fallback a General -> General sin crear categorías)
+      const resolvedCat = await resolveExistingOrFallbackCategory(client, {
+        userId,
+        categoryId,
+        categoryType,
+        categoryName,
+        subCategoryName,
+      });
 
       // 3. Registrar la transacción en la tabla transactions
       const insertTx = await client.query<{ id: string }>(
@@ -161,14 +287,14 @@ export async function createTransaction(req: Request, res: Response) {
           userId,
           resolvedAccountId,
           resolvedDestinationAccountId,
-          resolvedCategoryId,
+          resolvedCat.categoryId,
           date,
           amount,
           effectiveDestinationAmount,
           currency,
           categoryType,
-          categoryName,
-          subCategoryName,
+          resolvedCat.categoryName,
+          resolvedCat.subCategoryName,
           description,
           isRecurring,
         ]
@@ -558,18 +684,13 @@ export async function updateTransaction(req: Request, res: Response) {
           ? rawDestinationAmount
           : null;
 
-      let resolvedCategoryId = categoryId;
-      if (!resolvedCategoryId && categoryName) {
-        const catRes = await client.query<{ id: string }>(
-          `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active)
-           VALUES ($1, $2, $3, $4, TRUE)
-           ON CONFLICT (user_id, type, category_name, sub_category_name)
-           DO UPDATE SET is_active = TRUE
-           RETURNING id`,
-          [userId, categoryType, categoryName, subCategoryName]
-        );
-        resolvedCategoryId = catRes.rows[0]?.id || null;
-      }
+      const resolvedCat = await resolveExistingOrFallbackCategory(client, {
+        userId,
+        categoryId,
+        categoryType,
+        categoryName,
+        subCategoryName,
+      });
 
       // 4. Actualizar el registro de la transacción
       await client.query(
@@ -590,14 +711,14 @@ export async function updateTransaction(req: Request, res: Response) {
         [
           resolvedAccountId,
           resolvedDestinationAccountId,
-          resolvedCategoryId,
+          resolvedCat.categoryId,
           date,
           amount,
           effectiveDestinationAmount,
           currency,
           categoryType,
-          categoryName,
-          subCategoryName,
+          resolvedCat.categoryName,
+          resolvedCat.subCategoryName,
           description,
           isRecurring,
           transactionId,

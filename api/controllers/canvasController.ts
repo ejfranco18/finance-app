@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import {
   query,
+  withTransaction,
   ensureAccountReconciliationColumns,
   applyDailyCompoundInterest,
 } from '../lib/db';
@@ -76,10 +77,10 @@ export async function getUserSettings(req: Request, res: Response) {
         [userId]
       ),
       query(
-        `SELECT id, type, category_name, sub_category_name
+        `SELECT id, type, category_name, sub_category_name, COALESCE(is_global, FALSE) AS is_global
          FROM categories
-         WHERE user_id = $1 AND is_active = TRUE
-         ORDER BY category_name ASC, sub_category_name ASC`,
+         WHERE (is_global = TRUE OR user_id = $1) AND is_active = TRUE
+         ORDER BY is_global DESC, category_name ASC, sub_category_name ASC`,
         [userId]
       ),
     ]);
@@ -427,6 +428,406 @@ export async function runDailyInterestCron(req: Request, res: Response) {
     console.error('Error ejecutando cron de interés compuesto diario:', error);
     return res.status(500).json({
       error: 'Error interno al calcular el interés compuesto diario.',
+    });
+  }
+}
+
+const VALID_CUSTOM_CATEGORY_TYPES = new Set([
+  'INGRESO_FIJO',
+  'INGRESO_VARIABLE',
+  'GASTO',
+  'AHORRO',
+  'INVERSION',
+  'TRANSFERENCIA',
+]);
+
+/**
+ * POST /api/categories
+ * Crea explícitamente una categoría/subcategoría personalizada para el usuario (is_global = FALSE).
+ */
+export async function createCustomCategory(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || String(req.body?.userId || '').trim();
+    const rawType = String(req.body?.type || 'GASTO').trim().toUpperCase();
+    const categoryName = String(req.body?.categoryName || '').trim();
+    const subCategoryName = String(req.body?.subCategoryName || '').trim();
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Usuario no autenticado.' });
+    }
+    if (!VALID_CUSTOM_CATEGORY_TYPES.has(rawType)) {
+      return res.status(400).json({ error: 'Tipo de categoría no válido.' });
+    }
+    if (categoryName.length < 2 || categoryName.length > 60) {
+      return res.status(400).json({
+        error: 'El nombre de la categoría debe tener entre 2 y 60 caracteres.',
+      });
+    }
+    if (subCategoryName.length < 2 || subCategoryName.length > 60) {
+      return res.status(400).json({
+        error: 'El nombre de la subcategoría debe tener entre 2 y 60 caracteres.',
+      });
+    }
+
+    const category = await withTransaction(async (client) => {
+      // Asegurar que el usuario exista en users
+      await client.query(
+        `INSERT INTO users (id, email, display_name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO NOTHING`,
+        [userId, req.user?.email || `${userId}@user.local`, req.user?.name || 'Usuario']
+      );
+
+      // Verificar si ya existe como global o personalizada activa
+      const existing = await client.query<{ id: string; is_global: boolean }>(
+        `SELECT id, COALESCE(is_global, FALSE) AS is_global
+         FROM categories
+         WHERE (is_global = TRUE OR user_id = $1)
+           AND type = $2
+           AND LOWER(category_name) = LOWER($3)
+           AND LOWER(COALESCE(sub_category_name, '')) = LOWER($4)
+           AND is_active = TRUE
+         LIMIT 1`,
+        [userId, rawType, categoryName, subCategoryName]
+      );
+
+      if (existing.rows[0]) {
+        throw new Error('DUPLICATE_CATEGORY');
+      }
+
+      const inserted = await client.query<{
+        id: string;
+        user_id: string;
+        type: string;
+        category_name: string;
+        sub_category_name: string;
+        is_global: boolean;
+      }>(
+        `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active, is_global)
+         VALUES ($1, $2, $3, $4, TRUE, FALSE)
+         ON CONFLICT (user_id, type, category_name, sub_category_name)
+         DO UPDATE SET is_active = TRUE, category_name = EXCLUDED.category_name, sub_category_name = EXCLUDED.sub_category_name
+         RETURNING id, user_id, type, category_name, sub_category_name, is_global`,
+        [userId, rawType, categoryName, subCategoryName]
+      );
+
+      return inserted.rows[0];
+    });
+
+    return res.status(201).json({
+      message: 'Categoría personalizada creada exitosamente.',
+      category,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'DUPLICATE_CATEGORY') {
+      return res.status(409).json({
+        error: 'Esta categoría y subcategoría ya existe en el catálogo.',
+      });
+    }
+    console.error('Error al crear categoría personalizada:', error);
+    return res.status(500).json({
+      error: 'Error interno al crear la categoría personalizada.',
+    });
+  }
+}
+
+/**
+ * PUT /api/categories/:categoryId
+ * Edita una categoría o subcategoría personalizada del usuario (is_global = FALSE) y sincroniza sus transacciones asociadas.
+ */
+export async function updateCustomCategory(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || String(req.body?.userId || '').trim();
+    const categoryId = String(req.params.categoryId || '').trim();
+    const categoryName = String(req.body?.categoryName || '').trim();
+    const subCategoryName = String(req.body?.subCategoryName || '').trim();
+    const renameMacroCategory = Boolean(req.body?.renameMacroCategory);
+    const requestedType = req.body?.type
+      ? String(req.body.type).trim().toUpperCase()
+      : undefined;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Usuario no autenticado.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId)) {
+      return res.status(400).json({ error: 'ID de categoría no válido.' });
+    }
+    if (requestedType && !VALID_CUSTOM_CATEGORY_TYPES.has(requestedType)) {
+      return res.status(400).json({ error: 'Tipo de categoría no válido.' });
+    }
+    if (categoryName.length < 2 || categoryName.length > 60) {
+      return res.status(400).json({
+        error: 'El nombre de la categoría debe tener entre 2 y 60 caracteres.',
+      });
+    }
+    if (!renameMacroCategory && (subCategoryName.length < 2 || subCategoryName.length > 60)) {
+      return res.status(400).json({
+        error: 'El nombre de la subcategoría debe tener entre 2 y 60 caracteres.',
+      });
+    }
+
+    const updated = await withTransaction(async (client) => {
+      const currentRes = await client.query<{
+        id: string;
+        user_id: string | null;
+        type: string;
+        category_name: string;
+        sub_category_name: string | null;
+        is_global: boolean;
+      }>(
+        `SELECT id, user_id, type, category_name, sub_category_name, COALESCE(is_global, FALSE) AS is_global
+         FROM categories
+         WHERE id = $1::uuid
+         LIMIT 1`,
+        [categoryId]
+      );
+
+      const current = currentRes.rows[0];
+      if (!current) {
+        throw new Error('NOT_FOUND');
+      }
+      if (current.is_global || current.user_id !== userId) {
+        throw new Error('FORBIDDEN_GLOBAL');
+      }
+
+      const targetType = requestedType || current.type;
+
+      if (renameMacroCategory) {
+        // Verificar colisión si se renombra toda la categoría personalizada
+        const collision = await client.query<{ id: string }>(
+          `SELECT c1.id
+           FROM categories c1
+           WHERE (c1.is_global = TRUE OR c1.user_id = $1)
+             AND c1.type = $2
+             AND LOWER(c1.category_name) = LOWER($3)
+             AND LOWER(c1.category_name) != LOWER($4)
+             AND c1.is_active = TRUE
+             AND LOWER(COALESCE(c1.sub_category_name, '')) IN (
+               SELECT LOWER(COALESCE(c2.sub_category_name, ''))
+               FROM categories c2
+               WHERE c2.user_id = $1
+                 AND c2.is_global = FALSE
+                 AND c2.type = $5
+                 AND LOWER(c2.category_name) = LOWER($4)
+             )
+           LIMIT 1`,
+          [userId, targetType, categoryName, current.category_name, current.type]
+        );
+        if (collision.rows[0]) {
+          throw new Error('DUPLICATE_CATEGORY');
+        }
+
+        const updRes = await client.query<{
+          id: string;
+          user_id: string;
+          type: string;
+          category_name: string;
+          sub_category_name: string;
+          is_global: boolean;
+        }>(
+          `UPDATE categories
+           SET category_name = $1,
+               type = $2
+           WHERE user_id = $3
+             AND is_global = FALSE
+             AND type = $4
+             AND LOWER(category_name) = LOWER($5)
+           RETURNING id, user_id, type, category_name, sub_category_name, is_global`,
+          [categoryName, targetType, userId, current.type, current.category_name]
+        );
+
+        await client.query(
+          `UPDATE transactions
+           SET category_name = $1,
+               category_type = $2
+           WHERE user_id = $3
+             AND category_type = $4
+             AND LOWER(category_name) = LOWER($5)`,
+          [categoryName, targetType, userId, current.type, current.category_name]
+        );
+
+        return updRes.rows[0];
+      }
+
+      const duplicate = await client.query<{ id: string }>(
+        `SELECT id
+         FROM categories
+         WHERE id != $1::uuid
+           AND (is_global = TRUE OR user_id = $2)
+           AND type = $3
+           AND LOWER(category_name) = LOWER($4)
+           AND LOWER(COALESCE(sub_category_name, '')) = LOWER($5)
+           AND is_active = TRUE
+         LIMIT 1`,
+        [categoryId, userId, targetType, categoryName, subCategoryName]
+      );
+      if (duplicate.rows[0]) {
+        throw new Error('DUPLICATE_CATEGORY');
+      }
+
+      const updRes = await client.query<{
+        id: string;
+        user_id: string;
+        type: string;
+        category_name: string;
+        sub_category_name: string;
+        is_global: boolean;
+      }>(
+        `UPDATE categories
+         SET category_name = $1,
+             sub_category_name = $2,
+             type = $3
+         WHERE id = $4::uuid AND user_id = $5 AND is_global = FALSE
+         RETURNING id, user_id, type, category_name, sub_category_name, is_global`,
+        [categoryName, subCategoryName, targetType, categoryId, userId]
+      );
+
+      // Sincronizar los nombres denormalizados en las transacciones del usuario asociadas a esta subcategoría
+      await client.query(
+        `UPDATE transactions
+         SET category_name = $1,
+             sub_category_name = $2,
+             category_type = $3
+         WHERE user_id = $4
+           AND (
+             category_id = $5::uuid
+             OR (category_type = $6 AND category_name = $7 AND COALESCE(sub_category_name, '') = COALESCE($8, ''))
+           )`,
+        [
+          categoryName,
+          subCategoryName,
+          targetType,
+          userId,
+          categoryId,
+          current.type,
+          current.category_name,
+          current.sub_category_name || '',
+        ]
+      );
+
+      return updRes.rows[0];
+    });
+
+    return res.status(200).json({
+      message: 'Categoría personalizada actualizada exitosamente.',
+      category: updated,
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.message === 'NOT_FOUND') {
+        return res.status(404).json({ error: 'Categoría no encontrada.' });
+      }
+      if (error.message === 'FORBIDDEN_GLOBAL') {
+        return res.status(403).json({
+          error: 'Solo puedes editar tus propias categorías personalizadas (las categorías globales son fijas).',
+        });
+      }
+      if (error.message === 'DUPLICATE_CATEGORY') {
+        return res.status(409).json({
+          error: 'Ya existe otra categoría/subcategoría con ese nombre.',
+        });
+      }
+    }
+    console.error('Error al actualizar categoría personalizada:', error);
+    return res.status(500).json({
+      error: 'Error interno al actualizar la categoría personalizada.',
+    });
+  }
+}
+
+/**
+ * DELETE /api/categories/:categoryId
+ * Elimina una categoría personalizada del usuario (is_global = FALSE) y reasigna sus transacciones a General -> General.
+ */
+export async function deleteCustomCategory(req: Request, res: Response) {
+  try {
+    const userId = req.user?.uid || String(req.query.userId || '').trim();
+    const categoryId = String(req.params.categoryId || '').trim();
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Usuario no autenticado.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId)) {
+      return res.status(400).json({ error: 'ID de categoría no válido.' });
+    }
+
+    await withTransaction(async (client) => {
+      const currentRes = await client.query<{
+        id: string;
+        user_id: string | null;
+        type: string;
+        category_name: string;
+        sub_category_name: string | null;
+        is_global: boolean;
+      }>(
+        `SELECT id, user_id, type, category_name, sub_category_name, COALESCE(is_global, FALSE) AS is_global
+         FROM categories
+         WHERE id = $1::uuid
+         LIMIT 1`,
+        [categoryId]
+      );
+
+      const current = currentRes.rows[0];
+      if (!current) {
+        throw new Error('NOT_FOUND');
+      }
+      if (current.is_global || current.user_id !== userId) {
+        throw new Error('FORBIDDEN_GLOBAL');
+      }
+
+      const generalRes = await client.query<{ id: string }>(
+        `SELECT id
+         FROM categories
+         WHERE is_global = TRUE
+           AND LOWER(category_name) = 'general'
+           AND LOWER(COALESCE(sub_category_name, '')) = 'general'
+         LIMIT 1`
+      );
+      const generalId = generalRes.rows[0]?.id || null;
+
+      await client.query(
+        `UPDATE transactions
+         SET category_id = $1::uuid,
+             category_name = 'General',
+             sub_category_name = 'General'
+         WHERE user_id = $2
+           AND (
+             category_id = $3::uuid
+             OR (category_type = $4 AND category_name = $5 AND COALESCE(sub_category_name, '') = COALESCE($6, ''))
+           )`,
+        [
+          generalId,
+          userId,
+          categoryId,
+          current.type,
+          current.category_name,
+          current.sub_category_name || '',
+        ]
+      );
+
+      await client.query(
+        `DELETE FROM categories WHERE id = $1::uuid AND user_id = $2 AND is_global = FALSE`,
+        [categoryId, userId]
+      );
+    });
+
+    return res.status(200).json({
+      message: 'Categoría personalizada eliminada y movimientos reasignados a General.',
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.message === 'NOT_FOUND') {
+        return res.status(404).json({ error: 'Categoría no encontrada.' });
+      }
+      if (error.message === 'FORBIDDEN_GLOBAL') {
+        return res.status(403).json({
+          error: 'No puedes eliminar categorías globales del sistema.',
+        });
+      }
+    }
+    console.error('Error al eliminar categoría personalizada:', error);
+    return res.status(500).json({
+      error: 'Error interno al eliminar la categoría personalizada.',
     });
   }
 }

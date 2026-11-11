@@ -30,6 +30,9 @@ import {
   createAccount,
   reconcileAccount,
   runDailyInterestCron,
+  createCustomCategory,
+  updateCustomCategory,
+  deleteCustomCategory,
 } from './controllers/canvasController';
 import {
   getAiSettings,
@@ -59,10 +62,13 @@ app.post('/api/cron/daily-interest', runDailyInterestCron);
 // Inspección de base de datos (DBTest.tsx)
 app.get('/api/db-overview', authenticateUser, getDatabaseOverview);
 
-// 0. Creación y Conciliación de Cuentas (Bancos, Billeteras, Efectivo, Brokers)
+// 0. Creación y Conciliación de Cuentas (Bancos, Billeteras, Efectivo, Brokers) y Categorías Personalizadas
 app.post('/api/accounts', authenticateUser, createAccount);
 app.put('/api/accounts/:accountId/reconcile', authenticateUser, reconcileAccount);
 app.post('/api/accounts/:accountId/reconcile', authenticateUser, reconcileAccount);
+app.post('/api/categories', authenticateUser, createCustomCategory);
+app.put('/api/categories/:categoryId', authenticateUser, updateCustomCategory);
+app.delete('/api/categories/:categoryId', authenticateUser, deleteCustomCategory);
 
 // 1. Transacciones Generales
 app.post('/api/transactions', authenticateUser, createTransaction);
