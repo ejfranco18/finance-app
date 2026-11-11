@@ -14,6 +14,7 @@ import {
   callAgnosticLLM,
   extractTransactionDraft,
 } from './aiController';
+import { resolveExistingOrFallbackCategory } from './transactionController';
 
 const TELEGRAM_TOKEN_REGEX = /^\d{5,16}:[A-Za-z0-9_-]{25,64}$/;
 const MAX_MEDIA_BYTES = 8 * 1024 * 1024; // 8 MB límite de seguridad para notas de voz y fotos
@@ -224,16 +225,13 @@ async function executeAutoTransactionFromDraft(
       throw new Error('No se encontró ninguna cuenta activa para registrar el movimiento.');
     }
 
-    // 2. Asegurar la categoría en la tabla categories
-    const catRes = await client.query<{ id: string }>(
-      `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active)
-       VALUES ($1, $2, $3, $4, TRUE)
-       ON CONFLICT (user_id, type, category_name, sub_category_name)
-       DO UPDATE SET is_active = TRUE
-       RETURNING id`,
-      [userId, dbCategoryType, draft.categoriaMacroId, draft.subcategoria]
-    );
-    const categoryId = catRes.rows[0]?.id || null;
+    // 2. Resolver la categoría contra globales o personalizadas del usuario (sin crear categorías nuevas; fallback a General)
+    const resolvedCat = await resolveExistingOrFallbackCategory(client, {
+      userId,
+      categoryType: dbCategoryType,
+      categoryName: draft.categoriaMacroId,
+      subCategoryName: draft.subcategoria,
+    });
 
     // 3. Insertar en transactions
     const insertTx = await client.query<{ id: string }>(
@@ -246,14 +244,14 @@ async function executeAutoTransactionFromDraft(
       [
         userId,
         accountRow.id,
-        categoryId,
+        resolvedCat.categoryId,
         effectiveDate,
         draft.monto,
         accountRow.currency,
         dbCategoryType,
-        draft.categoriaMacroId,
-        draft.subcategoria,
-        draft.descripcion || draft.subcategoria,
+        resolvedCat.categoryName,
+        resolvedCat.subCategoryName,
+        draft.descripcion || resolvedCat.subCategoryName,
       ]
     );
 

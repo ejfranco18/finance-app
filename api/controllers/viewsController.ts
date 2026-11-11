@@ -145,7 +145,7 @@ export async function getDatabaseOverview(req: Request, res: Response) {
           [userId]
         ),
         client.query(
-          `SELECT * FROM categories WHERE user_id = $1 ORDER BY type, category_name, sub_category_name`,
+          `SELECT * FROM categories WHERE is_global = TRUE OR user_id = $1 ORDER BY is_global DESC, type, category_name, sub_category_name`,
           [userId]
         ),
         client.query(`SELECT * FROM accounts WHERE user_id = $1 ORDER BY created_at ASC`, [
@@ -243,6 +243,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       transactionsRes,
       assetsRes,
       liabilitiesRes,
+      categoriesRes,
     ] = await Promise.all([
       query(
         `SELECT main_currency, exchange_rate_cop_usd, ai_provider
@@ -289,7 +290,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
              c.type AS category_type,
              COALESCE(c.sub_category_name, 'General') AS sub_category_name
            FROM categories c
-           WHERE c.user_id = $1 AND c.is_active = TRUE
+           WHERE (c.is_global = TRUE OR c.user_id = $1) AND c.is_active = TRUE
            UNION
            SELECT
              t.category_name,
@@ -395,6 +396,19 @@ export async function getCanvasDashboard(req: Request, res: Response) {
          ORDER BY created_at ASC`,
         [userId]
       ),
+      query(
+        `SELECT
+           id,
+           user_id,
+           type,
+           category_name,
+           COALESCE(sub_category_name, 'General') AS sub_category_name,
+           COALESCE(is_global, FALSE) AS is_global
+         FROM categories
+         WHERE (is_global = TRUE OR user_id = $1) AND is_active = TRUE
+         ORDER BY is_global DESC, category_name ASC, sub_category_name ASC`,
+        [userId]
+      ),
     ]);
 
     const settings = settingsRes.rows[0] || {
@@ -421,6 +435,7 @@ export async function getCanvasDashboard(req: Request, res: Response) {
       transactions: transactionsRes.rows,
       assets: assetsRes.rows,
       liabilities: liabilitiesRes.rows,
+      categories: categoriesRes.rows,
     });
   } catch (error) {
     console.error('Error al obtener datos del Canvas Dashboard:', error);

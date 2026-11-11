@@ -8,8 +8,10 @@ import {
   AccountFormModal,
   StockHoldingFormModal,
   SellStockHoldingModal,
+  CategoriesManagerModal,
   InitialTransactionDraft,
   EditablePatrimonyItem,
+  CategoryOption,
 } from './FinanceForms';
 import { AIAssistantModal } from './AIAssistantModal';
 import {
@@ -29,6 +31,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Sparkles,
+  Tags,
   X,
 } from 'lucide-react';
 import styles from './Canvas.module.css';
@@ -193,6 +196,7 @@ interface CanvasDashboardResponse {
   transactions: TransactionRecord[];
   assets?: AssetRecord[];
   liabilities?: LiabilityRecord[];
+  categories?: CategoryOption[];
 }
 
 const CATEGORY_COLORS = [
@@ -314,6 +318,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
     useState<EditablePatrimonyItem | null>(null);
   const [isPeriodModalOpen, setIsPeriodModalOpen] = useState(false);
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const [isCategoriesModalOpen, setIsCategoriesModalOpen] = useState(false);
 
   const effectiveUserId = userId || auth.currentUser?.uid || '';
 
@@ -586,6 +591,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
   const trm = Number(data?.settings?.exchange_rate_cop_usd || 3303.16);
   const mainCurrency = data?.settings?.main_currency || 'COP';
   const accounts = data?.accounts || [];
+  const categories = data?.categories || [];
   const monthlyRows = data?.monthlyCanvas || [];
   const portfolio = data?.portfolio || [];
   const taxonomyRows = data?.taxonomy || [];
@@ -913,6 +919,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           setTxInitialDraft(null);
         }}
         accounts={accounts}
+        categories={categories}
         trm={trm}
         editingTransaction={editingTransaction}
         initialDraft={txInitialDraft}
@@ -969,6 +976,11 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           setTxInitialDraft(draft);
           setIsTxModalOpen(true);
         }}
+      />
+      <CategoriesManagerModal
+        isOpen={isCategoriesModalOpen}
+        onClose={() => setIsCategoriesModalOpen(false)}
+        categories={categories}
       />
 
       {/* Modal de Detalle y Conciliación Bancaria (Saldo Calculado vs. Saldo Real en Banco) */}
@@ -1686,6 +1698,15 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
           >
             <Sparkles className={styles.btnIcon} style={{ color: '#c084fc' }} />
             <span>Copiloto IA</span>
+          </button>
+
+          <button
+            onClick={() => setIsCategoriesModalOpen(true)}
+            className={styles.secondaryCyanBtn}
+            title="Ver catálogo de categorías globales y administrar tus categorías o subcategorías personalizadas"
+          >
+            <Tags className={styles.btnIcon} />
+            <span>Categorías</span>
           </button>
 
           <button onClick={() => setIsPeriodModalOpen(true)} className={styles.periodBtn}>
@@ -2927,6 +2948,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                                       type="button"
                                       onClick={() => {
                                         setEditingTransaction(tx);
+                                        setTxInitialDraft(null);
                                         setIsTxModalOpen(true);
                                       }}
                                       className={styles.editTxBtn}
@@ -3253,6 +3275,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ onLogout, userId }
                                       type="button"
                                       onClick={() => {
                                         setEditingTransaction(tx);
+                                        setTxInitialDraft(null);
                                         setIsTxModalOpen(true);
                                       }}
                                       className={styles.editTxBtn}

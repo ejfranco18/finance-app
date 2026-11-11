@@ -59,6 +59,7 @@ Compras	|	Regalos
 Compras	|	Otros compras
 Donaciones	|	Donaciones
 Otros	|	Otros gastos
+General	|	General
 
 ## 2. INGRESOS (`INGRESO_FIJO` / `INGRESO_VARIABLE`)
 Ingresos Fijos	|	Salario

@@ -506,10 +506,10 @@ export async function buildUserFinancialContext(userId: string): Promise<{
           LIMIT 120
         ) rt), '[]'::json) AS recent_transactions,
        COALESCE((SELECT json_agg(row_to_json(cat)) FROM (
-          SELECT type, category_name, sub_category_name
+          SELECT type, category_name, sub_category_name, COALESCE(is_global, FALSE) AS is_global
           FROM categories
-          WHERE user_id = $1 AND is_active = TRUE
-          ORDER BY type, category_name, sub_category_name
+          WHERE (is_global = TRUE OR user_id = $1) AND is_active = TRUE
+          ORDER BY is_global DESC, type, category_name, sub_category_name
         ) cat), '[]'::json) AS categories_catalog`,
     [userId]
   );
@@ -536,6 +536,7 @@ REGLAS DE RESPUESTA:
    - Incluye siempre el campo \`"fecha"\` en formato \`"YYYY-MM-DD"\`. Si el usuario indica una fecha para cada movimiento (ej. "31 de octubre", "1 de noviembre", "2 de noviembre", "ayer"), calcula la fecha exacta en formato \`YYYY-MM-DD\` tomando como referencia la fecha actual en Colombia (${todayBogota}). Si no menciona fecha, usa \`"${todayBogota}"\`.
    - En pesos colombianos (COP), cuando el usuario escribe un punto seguido de 3 dígitos (ej. "122.452 pesos" o "58.450"), ese punto es separador de miles: escribe siempre el número entero completo en el JSON (\`122452\`, \`58450\`), NUNCA como decimal (\`122.452\`).
    - Si el usuario escribe el nombre de una cuenta con algún error tipográfico (ej. "TC bando de bogota"), mapéalo al nombre exacto de su cuenta activa en \`accounts\` (ej. "TC Banco de Bogota").
+   - Usa ÚNICAMENTE una combinación \`categoriaMacroId\` y \`subcategoria\` que exista en el CATÁLOGO OFICIAL DE CATEGORÍAS Y SUBCATEGORÍAS (sección 8). Si ninguna categoría del catálogo se ajusta, usa \`"categoriaMacroId": "General"\` y \`"subcategoria": "General"\` (nunca inventes categorías nuevas).
 \`\`\`transaction_draft
 [
   {

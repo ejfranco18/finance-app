@@ -193,10 +193,10 @@ function updateQueryMdFile(queryFilePath, transactions) {
           `Cuenta destino "${tx.destination_account_name}" no tiene variable PL/pgSQL mapeada en ACCOUNT_VAR_MAP`
         );
       }
-      return `    INSERT INTO transactions (user_id, account_id, destination_account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, ${destVar}, (SELECT id FROM categories WHERE user_id = v_user_id AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
+      return `    INSERT INTO transactions (user_id, account_id, destination_account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, ${destVar}, (SELECT id FROM categories WHERE (is_global = TRUE OR user_id = v_user_id) AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' ORDER BY is_global DESC LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
     }
 
-    return `    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, (SELECT id FROM categories WHERE user_id = v_user_id AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
+    return `    INSERT INTO transactions (user_id, account_id, category_id, date, amount, currency, category_type, category_name, sub_category_name, description) VALUES (v_user_id, ${accVar}, (SELECT id FROM categories WHERE (is_global = TRUE OR user_id = v_user_id) AND type = '${tx.category_type}' AND sub_category_name = '${subEscaped}' ORDER BY is_global DESC LIMIT 1), '${tx.date}', ${tx.amount.toFixed(2)}, '${tx.currency}', '${tx.category_type}', '${catEscaped}', '${subEscaped}', '${descEscaped}');`;
   });
 
   const sectionHeaderRegex =
@@ -230,23 +230,25 @@ async function syncDatabase(transactions, catalogMap, userId) {
     const accountByName = new Map(accRes.rows.map((r) => [r.name.toLowerCase(), r.id]));
 
     const catRes = await client.query(
-      'SELECT id, type, category_name, sub_category_name FROM categories WHERE user_id = $1',
+      'SELECT id, type, category_name, sub_category_name FROM categories WHERE is_global = TRUE OR user_id = $1',
       [userId]
     );
     const categoryByKey = new Map(
       catRes.rows.map((r) => [`${r.type}|${r.sub_category_name.toLowerCase()}`, r])
     );
 
-    // Ensure all subcategories in categories.md exist in Neon DB
+    // Ensure all subcategories in categories.md exist in Neon DB as global categories
     let createdCategories = 0;
     for (const entry of catalogMap.values()) {
       const key = `${entry.type}|${entry.sub_category_name.toLowerCase()}`;
       if (!categoryByKey.has(key)) {
         const insCat = await client.query(
-          `INSERT INTO categories (user_id, type, category_name, sub_category_name)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO categories (user_id, type, category_name, sub_category_name, is_active, is_global)
+           VALUES (NULL, $1, $2, $3, TRUE, TRUE)
+           ON CONFLICT (type, category_name, sub_category_name) WHERE is_global = TRUE
+           DO UPDATE SET is_active = TRUE
            RETURNING id, type, category_name, sub_category_name`,
-          [userId, entry.type, entry.category_name, entry.sub_category_name]
+          [entry.type, entry.category_name, entry.sub_category_name]
         );
         categoryByKey.set(key, insCat.rows[0]);
         createdCategories += 1;
